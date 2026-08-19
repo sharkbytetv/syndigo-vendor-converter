@@ -266,6 +266,16 @@
         <input type="file" id="dmd-input" accept=".xlsx,.xlsm">
         <div class="file-status" id="dmd-status"></div>
       </div>
+      <div class="tmpl-slot">
+        <label>Taxonomy Model <span style="font-weight:400;font-size:0.85em;color:#888">(optional — for L4 hierarchy paths)</span></label>
+        <div class="drop-zone" id="tax-drop">
+          <div class="drop-icon">🗂️</div>
+          <strong>full taxonomy model.xlsx</strong>
+          Click or drag to load
+        </div>
+        <input type="file" id="tax-input" accept=".xlsx,.xlsm">
+        <div class="file-status" id="tax-status"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -357,6 +367,7 @@ const RELATIONSHIP_TYPE = "sku@@Product";
 const PROD_TMPL_KEY = "syndigo_prod_tmpl_v2";
 const SKU_TMPL_KEY  = "syndigo_sku_tmpl_v2";
 const DMD_KEY       = "syndigo_dmd_v2";
+const TAX_KEY       = "syndigo_tax_v1";
 
 // src  = register/quote column header (input file)
 // thg  = Syndigo attribute short name (stable canonical ID, looked up in DMD)
@@ -533,15 +544,130 @@ function normHeader(s) {
 
 // Build dispName-keyed lookups from the DMD for auto-matching.
 function buildDmdReverseMaps(dmd) {
-  var dispToGroup = {}, dispToMandatory = {};
+  var dispToGroup = {}, dispToMandatory = {}, dispToThg = {};
   Object.keys(dmd.map).forEach(function(thg) {
     var disp = dmd.map[thg];
     if (disp) {
       dispToGroup[disp]     = dmd.groupMap[thg]     || "";
       dispToMandatory[disp] = dmd.mandatoryMap[thg] || false;
+      dispToThg[disp]       = thg;
     }
   });
-  return { dispToGroup: dispToGroup, dispToMandatory: dispToMandatory };
+  return { dispToGroup: dispToGroup, dispToMandatory: dispToMandatory, dispToThg: dispToThg };
+}
+
+// Build entity assignment map from E-A-R MODEL sheet.
+// Returns { product: {[thgKey]: true}, sku: {[thgKey]: true} }
+function buildEarMap(wb) {
+  var ws = wb.Sheets["E-A-R MODEL"];
+  if (!ws) return { product: {}, sku: {} };
+
+  var range = XLSX.utils.decode_range(ws["!ref"] || "A1");
+  var entityMap = { product: {}, sku: {} };
+
+  var entityCi = -1, attrCi = -1;
+  for (var c = range.s.c; c <= range.e.c; c++) {
+    var hCell = ws[XLSX.utils.encode_cell({ r: 0, c: c })];
+    if (!hCell) continue;
+    var h = String(hCell.v || "").trim().toUpperCase();
+    if (h === "ENTITY")           entityCi = c;
+    if (h === "MAPPED ATTRIBUTE") attrCi   = c;
+  }
+  if (entityCi < 0 || attrCi < 0) return { product: {}, sku: {} };
+
+  for (var r = 1; r <= range.e.r; r++) {
+    var entityCell = ws[XLSX.utils.encode_cell({ r: r, c: entityCi })];
+    var attrCell   = ws[XLSX.utils.encode_cell({ r: r, c: attrCi   })];
+    if (!entityCell || !attrCell) continue;
+    var entity = String(entityCell.v || "").trim().toLowerCase();
+    var attr   = String(attrCell.v   || "").trim();
+    if (!attr) continue;
+    if (entity === "product") entityMap.product[attr] = true;
+    else if (entity === "sku") entityMap.sku[attr] = true;
+  }
+  return entityMap;
+}
+
+// Build displayName→fullPath map from the taxonomy model's CATEGORIES sheet.
+// Filters for productTaxonomy; traverses PARENT CATEGORY chains to build paths.
+// Path format: taxonomyDisplayName>>L1>>...>>Ln  (separator >>)
+// Returns { pathMap: {displayName: fullPath}, taxonomyName: string }
+function buildTaxonomyPathMap(wb) {
+  var taxonomyId = "productTaxonomy";
+  var taxName = taxonomyId;
+
+  // Resolve taxonomy display name from TAXONOMIES sheet
+  var taxWs = wb.Sheets["TAXONOMIES"];
+  if (taxWs) {
+    var taxRange = XLSX.utils.decode_range(taxWs["!ref"] || "A1");
+    var tNameCi = -1, tDispCi = -1;
+    for (var tc = taxRange.s.c; tc <= taxRange.e.c; tc++) {
+      var th = String((taxWs[XLSX.utils.encode_cell({r:0,c:tc})]||{}).v||"").trim().toUpperCase();
+      if (th === "NAME") tNameCi = tc;
+      if (th === "DISPLAY NAME") tDispCi = tc;
+    }
+    for (var tr = 1; tr <= taxRange.e.r; tr++) {
+      var tNameCell = taxWs[XLSX.utils.encode_cell({r:tr,c:tNameCi})];
+      if (!tNameCell || String(tNameCell.v||"").trim() !== taxonomyId) continue;
+      if (tDispCi >= 0) {
+        var tDispCell = taxWs[XLSX.utils.encode_cell({r:tr,c:tDispCi})];
+        if (tDispCell) taxName = String(tDispCell.v||"").trim() || taxName;
+      }
+      break;
+    }
+  }
+
+  var catWs = wb.Sheets["CATEGORIES"];
+  if (!catWs) return { pathMap: {}, taxonomyName: taxName };
+
+  var catRange = XLSX.utils.decode_range(catWs["!ref"] || "A1");
+  var nameCi = -1, parentCi = -1, belongsCi = -1, dispCi = -1;
+  for (var cc = catRange.s.c; cc <= catRange.e.c; cc++) {
+    var ch = String((catWs[XLSX.utils.encode_cell({r:0,c:cc})]||{}).v||"").trim().toUpperCase();
+    if (ch === "NAME")                nameCi   = cc;
+    if (ch === "PARENT CATEGORY")     parentCi = cc;
+    if (ch === "BELONGS TO TAXONOMY") belongsCi= cc;
+    if (ch === "DISPLAY NAME")        dispCi   = cc;
+  }
+  if (nameCi < 0 || dispCi < 0) return { pathMap: {}, taxonomyName: taxName };
+
+  // name → {displayName, parent (node name)}
+  var nodes = {};
+  for (var cr = 1; cr <= catRange.e.r; cr++) {
+    var belongs = String((catWs[XLSX.utils.encode_cell({r:cr,c:belongsCi})]||{}).v||"").trim();
+    if (belongs !== taxonomyId) continue;
+    var nName   = String((catWs[XLSX.utils.encode_cell({r:cr,c:nameCi})]||{}).v||"").trim();
+    var nDisp   = String((catWs[XLSX.utils.encode_cell({r:cr,c:dispCi})]||{}).v||"").trim();
+    var nParent = parentCi >= 0 ? String((catWs[XLSX.utils.encode_cell({r:cr,c:parentCi})]||{}).v||"").trim() : "";
+    if (nName && nDisp) nodes[nName] = { displayName: nDisp, parent: nParent };
+  }
+
+  // Traverse parent chain (by name) to build full paths
+  function buildPath(name, depth) {
+    if (!name || !nodes[name] || depth > 12) return null;
+    var node = nodes[name];
+    if (!node.parent || !nodes[node.parent]) return taxName + ">>" + node.displayName;
+    var parentPath = buildPath(node.parent, depth + 1);
+    return parentPath ? (parentPath + ">>" + node.displayName) : (taxName + ">>" + node.displayName);
+  }
+
+  // Identify parent nodes (any node that is referenced as a parent)
+  var isParent = {};
+  Object.keys(nodes).forEach(function(name) {
+    if (nodes[name].parent) isParent[nodes[name].parent] = true;
+  });
+
+  // Build pathMap keyed by lowercase displayName for case-insensitive lookup.
+  // When multiple nodes share a display name, prefer leaf nodes (not a parent of anyone).
+  var pathMap = {};
+  Object.keys(nodes).forEach(function(name) {
+    var path = buildPath(name, 0);
+    if (!path) return;
+    var key = nodes[name].displayName.toLowerCase();
+    if (!pathMap[key] || !isParent[name]) pathMap[key] = path;
+  });
+
+  return { pathMap: pathMap, taxonomyName: taxName };
 }
 
 // Auto-match input headers to template columns and DMD attributes.
@@ -805,8 +931,9 @@ function buildProductRow(product, resolvedCols, prodIdCi, prodTypeCi, prodNameCi
   return cells;
 }
 
-function buildSKURow(sku, resolvedCols, skuIdCi, skuProdIdCi, skuTypeCi, skuNameCi) {
+function buildSKURow(sku, resolvedCols, skuIdCi, skuProdIdCi, skuTypeCi, skuNameCi, skuSeqCi, seqNum) {
   var cells = {};
+  if (skuSeqCi    !== undefined && seqNum)          cells[skuSeqCi]    = String(seqNum);
   if (skuTypeCi   !== undefined)                    cells[skuTypeCi]   = "sku";
   if (skuNameCi   !== undefined && sku._productId)  cells[skuNameCi]   = String(sku._productId);
   if (skuIdCi     !== undefined && sku._skuId)      cells[skuIdCi]     = String(sku._skuId);
@@ -820,11 +947,12 @@ function buildSKURow(sku, resolvedCols, skuIdCi, skuProdIdCi, skuTypeCi, skuName
 }
 
 function buildRelRows(relColMap, skus) {
-  return skus.map(function(s) {
+  var relIdCi = relColMap["ID"];
+  return skus.map(function(s, idx) {
     var cells = {};
+    if (relIdCi !== undefined) cells[relIdCi] = String(idx + 1);
     var data = {
       "Type":            RELATIONSHIP_TYPE,
-      "Related to ID":   String(s._productId || ""),
       "Related to Type": "product",
       "Product ID":      String(s._productId || ""),
     };
@@ -1260,7 +1388,93 @@ function updateSheetDimension(wsXml, endColCi, endRow) {
 //     Style is copied from the last existing row-2 cell of that group.
 //   • If the GROUP is not in the template, append at the right edge and create a new
 //     row-1 merged header with the group name.
-async function buildOutputBuffer(templateBuf, entityRows, relRows, appendedEntityCols) {
+// Update the Reference Data sheet's taxonomy column with resolved L4 paths,
+// and patch the named range in workbook.xml to cover the new extent.
+async function updateRefDataTaxPaths(zip, paths) {
+  var refPath = await findSheetPath(zip, "Reference Data");
+  if (!refPath) return;
+  var fullRefPath = "xl/" + refPath;
+
+  // Resolve shared string index for "thgl4hierarchynode"
+  var ssFile = zip.file("xl/sharedStrings.xml");
+  if (!ssFile) return;
+  var ssXml = await ssFile.async("string");
+  var ssArr = [];
+  var siRe = /<si>([\s\S]*?)<\/si>/g, siM;
+  while ((siM = siRe.exec(ssXml)) !== null) {
+    var texts = [], tRe = /<t(?:\s[^>]*)?>([^<]*)<\/t>/g, tM;
+    while ((tM = tRe.exec(siM[1])) !== null) texts.push(tM[1]);
+    ssArr.push(texts.join(""));
+  }
+  var taxSsIdx = ssArr.indexOf("thgl4hierarchynode");
+  if (taxSsIdx < 0) return;
+
+  // Find which column letter carries thgl4hierarchynode in row 1
+  var xml = await zip.file(fullRefPath).async("string");
+  var row1M = xml.match(/<row\b[^>]*\br="1"[^>]*>([\s\S]*?)<\/row>/);
+  if (!row1M) return;
+  var taxColLetter = null;
+  var hCellRe = /<c\b[^>]*\br="([A-Z]+)1"[^>]*>([\s\S]*?)<\/c>/g, hCellM;
+  while ((hCellM = hCellRe.exec(row1M[1])) !== null) {
+    var vM = hCellM[2].match(/<v>(\d+)<\/v>/);
+    if (vM && parseInt(vM[1]) === taxSsIdx) { taxColLetter = hCellM[1]; break; }
+  }
+  if (!taxColLetter) return;
+
+  // Parse existing rows; keep non-taxonomy cells as-is, drop old taxonomy cells
+  var sdM = xml.match(/<sheetData\b[^>]*>([\s\S]*?)<\/sheetData>/);
+  if (!sdM) return;
+  var rowsMap = {}, maxExistingRow = 1;
+  var rowRe = /<row\b[^>]*\br="(\d+)"[^>]*>([\s\S]*?)<\/row>/g, rowM;
+  while ((rowM = rowRe.exec(sdM[1])) !== null) {
+    var rn = parseInt(rowM[1]);
+    if (rn > maxExistingRow) maxExistingRow = rn;
+    if (rn === 1) {
+      rowsMap[1] = rowM[0];
+    } else {
+      var nonTaxCells = [];
+      var cRe = /<c\b[^>]*\br="([A-Z]+)\d+"[^>]*>[\s\S]*?<\/c>/g, cM;
+      while ((cM = cRe.exec(rowM[2])) !== null) {
+        if (cM[1] !== taxColLetter) nonTaxCells.push(cM[0]);
+      }
+      rowsMap[rn] = nonTaxCells;
+    }
+  }
+
+  var maxRow = Math.max(maxExistingRow, paths.length + 1);
+  var newRows = [];
+  if (rowsMap[1]) newRows.push(rowsMap[1]);
+
+  for (var r = 2; r <= maxRow; r++) {
+    var pathVal = paths[r - 2];
+    var nonTaxCells = rowsMap[r] || [];
+    var cells = nonTaxCells.slice();
+    if (pathVal) {
+      cells.push('<c r="' + taxColLetter + r + '" t="inlineStr"><is><t>' + escXml(pathVal) + '</t></is></c>');
+    }
+    if (!cells.length) continue;
+    cells.sort(function(a, b) {
+      var am = a.match(/\br="([A-Z]+)\d+"/), bm = b.match(/\br="([A-Z]+)\d+"/);
+      if (!am || !bm) return 0;
+      return XLSX.utils.decode_col(am[1]) - XLSX.utils.decode_col(bm[1]);
+    });
+    newRows.push('<row r="' + r + '">' + cells.join("") + '</row>');
+  }
+
+  xml = xml.replace(/<sheetData\b[^>]*>[\s\S]*?<\/sheetData>/, "<sheetData>" + newRows.join("") + "</sheetData>");
+  xml = updateSheetDimension(xml, -1, maxRow);
+  zip.file(fullRefPath, xml);
+
+  // Patch the named range in workbook.xml to cover the new row extent
+  var wbXml = await zip.file("xl/workbook.xml").async("string");
+  wbXml = wbXml.replace(
+    /(name="RSC_thgl4hierarchynode"[^>]*>)[^<]*/,
+    "$1'Reference Data'!$" + taxColLetter + "$2:$" + taxColLetter + "$" + (paths.length + 1)
+  );
+  zip.file("xl/workbook.xml", wbXml);
+}
+
+async function buildOutputBuffer(templateBuf, entityRows, relRows, appendedEntityCols, l4Paths) {
   var zip = await JSZip.loadAsync(templateBuf);
 
   var entitiesPath = await findSheetPath(zip, "Entities");
@@ -1433,6 +1647,10 @@ async function buildOutputBuffer(templateBuf, entityRows, relRows, appendedEntit
     }
   }
 
+  if (l4Paths && l4Paths.length) {
+    await updateRefDataTaxPaths(zip, l4Paths);
+  }
+
   return zip.generateAsync({ type: "arraybuffer", compression: "DEFLATE", compressionOptions: { level: 6 } });
 }
 
@@ -1448,7 +1666,7 @@ function downloadBuf(buf, filename) {
 // ============================================================
 
 var state = {
-  productRows: null, prodTemplateBuf: null,
+  productRows: null, prodTemplateBuf: null, l4Paths: null,
   skuRows: null, skuRelRows: null, skuTemplateBuf: null
 };
 
@@ -1493,6 +1711,10 @@ function showTemplateCached(key, label, statusId, dropId) {
       n = Object.keys(dmdMap).length;
       if (!n) throw new Error("0 attributes");
       badge = n + " attributes cached";
+    } else if (key === TAX_KEY) {
+      var taxResult = buildTaxonomyPathMap(wb);
+      n = Object.keys(taxResult.pathMap).length;
+      badge = n ? (n + " categories cached") : "loaded (no productTaxonomy categories)";
     } else {
       if (!wb.Sheets["Entities"]) throw new Error("no Entities sheet");
       var map = buildColMap(wb, "Entities");
@@ -1539,6 +1761,8 @@ async function handleTemplateFile(file, key, label, statusId, dropId) {
       if (!wb.Sheets["ATTRIBUTES"]) throw new Error("No ATTRIBUTES sheet — is this the Thing Data Model export?");
       var dmdMap = buildDmdMap(wb);
       if (!Object.keys(dmdMap).length) throw new Error("No attributes found in ATTRIBUTES sheet.");
+    } else if (key === TAX_KEY) {
+      if (!wb.Sheets["CATEGORIES"]) throw new Error("No CATEGORIES sheet — is this the taxonomy model export?");
     } else {
       if (!wb.Sheets["Entities"]) throw new Error("No 'Entities' sheet — is this a Syndigo import template?");
       if (!Object.keys(buildColMap(wb, "Entities")).length)
@@ -1562,7 +1786,7 @@ async function handleInputFile(file) {
   clearLog();
   document.getElementById("btn-dl-products").disabled = true;
   document.getElementById("btn-dl-skus").disabled     = true;
-  state.productRows = null; state.prodTemplateBuf = null;
+  state.productRows = null; state.prodTemplateBuf = null; state.l4Paths = null;
   state.skuRows = null; state.skuRelRows = null; state.skuTemplateBuf = null;
 
   var prodBuf = loadTemplateBuffer(PROD_TMPL_KEY);
@@ -1610,15 +1834,54 @@ async function handleInputFile(file) {
   if (!products.length) { log("err", "No products found."); return; }
 
   // Build DMD map
-  var dmdWb, dmdMap, dmdGroupMap, dmdMandatoryMap;
+  var dmdWb, dmdMap, dmdGroupMap, dmdMandatoryMap, earMap;
   try {
     dmdWb  = XLSX.read(dmdBuf, { type: "array" });
     var dmd = buildDmdMap(dmdWb);
     dmdMap = dmd.map; dmdGroupMap = dmd.groupMap; dmdMandatoryMap = dmd.mandatoryMap;
-    log("info", "DMD loaded: <strong>" + Object.keys(dmdMap).length + "</strong> attributes");
+    earMap = buildEarMap(dmdWb);
+    var earProdCount = Object.keys(earMap.product).length;
+    var earSkuCount  = Object.keys(earMap.sku).length;
+    log("info", "DMD loaded: <strong>" + Object.keys(dmdMap).length + "</strong> attributes" +
+      (earProdCount || earSkuCount
+        ? " (E-A-R: <strong>" + earProdCount + "</strong> product, <strong>" + earSkuCount + "</strong> sku)"
+        : " — E-A-R MODEL empty, append filtering skipped"));
   } catch(e) { log("err", "DMD error: " + escHtml(e.message)); return; }
 
   var dmdReverse = buildDmdReverseMaps({ map: dmdMap, groupMap: dmdGroupMap, mandatoryMap: dmdMandatoryMap });
+
+  // Load taxonomy path map (optional) — transforms L4 Product Type from node name to full path
+  var taxBuf = loadTemplateBuffer(TAX_KEY);
+  if (taxBuf) {
+    try {
+      var taxWb = XLSX.read(taxBuf, { type: "array" });
+      var taxResult = buildTaxonomyPathMap(taxWb);
+      var taxPathMap = taxResult.pathMap;
+      var taxCount = Object.keys(taxPathMap).length;
+      if (taxCount) {
+        log("info", "Taxonomy model: <strong>" + taxCount + "</strong> productTaxonomy categories");
+        products.forEach(function(p) {
+          var raw = p["L4 Product Type"];
+          if (raw) {
+            var path = taxPathMap[raw.toLowerCase()];
+            if (path) p["L4 Product Type"] = path;
+          }
+        });
+        // Collect distinct resolved L4 paths for Reference Data dropdown update
+        var l4PathSeen = {};
+        state.l4Paths = [];
+        products.forEach(function(p) {
+          var v = p["L4 Product Type"];
+          if (v && !l4PathSeen[v]) { l4PathSeen[v] = true; state.l4Paths.push(v); }
+        });
+        if (!state.l4Paths.length) state.l4Paths = null;
+      } else {
+        log("warn", "Taxonomy model loaded but no productTaxonomy categories found — L4 hierarchy will use raw node name");
+      }
+    } catch(e) {
+      log("warn", "Taxonomy model could not be parsed: " + escHtml(e.message) + " — L4 hierarchy will use raw node name");
+    }
+  }
 
   // ── PRODUCT ─────────────────────────────────────────────────
   try {
@@ -1642,8 +1905,13 @@ async function handleInputFile(file) {
     var nextProdCi = maxProdCi + 1;
     var prodUsedDisp = {};
     resolvedProdCols.forEach(function(c) { prodUsedDisp[c.dispName] = true; });
+    var earHasProduct = Object.keys(earMap.product).length > 0;
     autoProd.appended.concat(rProd.appended).concat(rDimP.appended).forEach(function(col) {
       if (prodUsedDisp[col.dispName]) return;
+      if (earHasProduct) {
+        var thgKey = col.thg || dmdReverse.dispToThg[col.dispName];
+        if (!thgKey || !earMap.product[thgKey]) return;
+      }
       prodUsedDisp[col.dispName] = true;
       col.ci = nextProdCi++;
       resolvedProdCols.push(col);
@@ -1690,8 +1958,13 @@ async function handleInputFile(file) {
     var nextSkuCi = maxSkuCi + 1;
     var skuUsedDisp = {};
     resolvedSkuCols.forEach(function(c) { skuUsedDisp[c.dispName] = true; });
+    var earHasSku = Object.keys(earMap.sku).length > 0;
     autoSku.appended.concat(rSku.appended).concat(rDimS.appended).forEach(function(col) {
       if (skuUsedDisp[col.dispName]) return;
+      if (earHasSku) {
+        var thgKey = col.thg || dmdReverse.dispToThg[col.dispName];
+        if (!thgKey || !earMap.sku[thgKey]) return;
+      }
       skuUsedDisp[col.dispName] = true;
       col.ci = nextSkuCi++;
       resolvedSkuCols.push(col);
@@ -1711,7 +1984,8 @@ async function handleInputFile(file) {
     log("ok", "SKU columns resolved: <strong>" + resolvedSkuCols.length + "</strong> mapped" +
       (appendedSkuCols.length ? " (<strong>" + appendedSkuCols.length + "</strong> appended)" : ""));
 
-    state.skuRows       = allSkus.map(function(s) { return buildSKURow(s, resolvedSkuCols, skuIdCi, skuProdIdCi, skuTypeCi, skuNameCi); });
+    var skuSeqCi = skuMap["ID"];
+    state.skuRows = allSkus.map(function(s, idx) { return buildSKURow(s, resolvedSkuCols, skuIdCi, skuProdIdCi, skuTypeCi, skuNameCi, skuSeqCi, idx + 1); });
     state.skuTemplateBuf = skuBuf;
 
     if (registerFlow && Object.keys(relMap).length) {
@@ -1736,7 +2010,7 @@ document.getElementById("btn-dl-products").addEventListener("click", async funct
   this.disabled = true;
   this.textContent = "Building…";
   try {
-    var buf = await buildOutputBuffer(state.prodTemplateBuf, state.productRows, null, state.appendedProdCols || []);
+    var buf = await buildOutputBuffer(state.prodTemplateBuf, state.productRows, null, state.appendedProdCols || [], state.l4Paths || null);
     var ts = new Date().toISOString().replace(/[-:]/g, "").replace("T", "_").slice(0, 15);
     downloadBuf(buf, "Syndigo_Product_Import_" + ts + ".xlsm");
   } catch(e) {
@@ -1793,6 +2067,9 @@ setupDropZone("sku-tmpl-drop", "sku-tmpl-input", function(f) {
 setupDropZone("dmd-drop", "dmd-input", function(f) {
   handleTemplateFile(f, DMD_KEY, "thing data model.xlsx", "dmd-status", "dmd-drop");
 });
+setupDropZone("tax-drop", "tax-input", function(f) {
+  handleTemplateFile(f, TAX_KEY, "full taxonomy model.xlsx", "tax-status", "tax-drop");
+});
 setupDropZone("input-drop", "input-file-input", handleInputFile);
 
 // ============================================================
@@ -1800,9 +2077,10 @@ setupDropZone("input-drop", "input-file-input", handleInputFile);
 // ============================================================
 
 (function init() {
-  showTemplateCached(PROD_TMPL_KEY, "product.xlsm",            "prod-tmpl-status", "prod-tmpl-drop");
-  showTemplateCached(SKU_TMPL_KEY,  "SKU.xlsm",                "sku-tmpl-status",  "sku-tmpl-drop");
-  showTemplateCached(DMD_KEY,       "thing data model.xlsx",   "dmd-status",       "dmd-drop");
+  showTemplateCached(PROD_TMPL_KEY, "product.xlsm",              "prod-tmpl-status", "prod-tmpl-drop");
+  showTemplateCached(SKU_TMPL_KEY,  "SKU.xlsm",                  "sku-tmpl-status",  "sku-tmpl-drop");
+  showTemplateCached(DMD_KEY,       "thing data model.xlsx",     "dmd-status",       "dmd-drop");
+  showTemplateCached(TAX_KEY,       "full taxonomy model.xlsx",  "tax-status",       "tax-drop");
   checkTemplatesReady();
 }());
 </script>
