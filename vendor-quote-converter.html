@@ -276,6 +276,16 @@
         <input type="file" id="tax-input" accept=".xlsx,.xlsm">
         <div class="file-status" id="tax-status"></div>
       </div>
+      <div class="tmpl-slot">
+        <label>Data Dictionary <span style="font-weight:400;font-size:0.85em;color:#888">(optional — for KVA / Shopify Variant Options)</span></label>
+        <div class="drop-zone" id="dd-drop">
+          <div class="drop-icon">📖</div>
+          <strong>Data Dictionary.xlsx</strong>
+          Click or drag to load
+        </div>
+        <input type="file" id="dd-input" accept=".xlsx,.xlsm">
+        <div class="file-status" id="dd-status"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -368,6 +378,7 @@ const PROD_TMPL_KEY = "syndigo_prod_tmpl_v2";
 const SKU_TMPL_KEY  = "syndigo_sku_tmpl_v2";
 const DMD_KEY       = "syndigo_dmd_v2";
 const TAX_KEY       = "syndigo_tax_v1";
+const DD_KEY        = "syndigo_dd_v1";
 
 // src  = register/quote column header (input file)
 // thg  = Syndigo attribute short name (stable canonical ID, looked up in DMD)
@@ -873,6 +884,54 @@ function detectQuoteSheet(wb) {
       return { name: n, format: "General" };
   }
   return { name: wb.SheetNames[0], format: "General" };
+}
+
+// Build L4ProductType (lowercase) → [{fieldId, displayName}] map for KVA rows.
+// Discovers column positions by header name — no hardcoded indices.
+function buildKvaMap(ddWb) {
+  // Attribute Master: displayName → Syndigo Field ID
+  var amWs = ddWb.Sheets["Attribute Master"];
+  if (!amWs) throw new Error("DD missing 'Attribute Master' sheet");
+  var amRows = XLSX.utils.sheet_to_json(amWs, { header: 1, defval: "" });
+  if (amRows.length < 2) throw new Error("Attribute Master sheet appears empty");
+  var amHdrs    = (amRows[0] || []).map(function(h) { return String(h).trim(); });
+  var amDispIdx  = amHdrs.indexOf("Attribute Display Name");
+  var amFieldIdx = amHdrs.indexOf("Syndigo Field ID");
+  if (amDispIdx < 0 || amFieldIdx < 0)
+    throw new Error("Attribute Master: missing 'Attribute Display Name' or 'Syndigo Field ID' column");
+  var dispToFieldId = {};
+  for (var i = 1; i < amRows.length; i++) {
+    var disp = String(amRows[i][amDispIdx]  || "").trim();
+    var fid  = String(amRows[i][amFieldIdx] || "").trim();
+    if (disp && fid) dispToFieldId[disp] = fid;
+  }
+
+  // Category Specific Attributes: L4 Product Type + KVA flag + display name
+  var csaWs = ddWb.Sheets["Category Specific Attributes"];
+  if (!csaWs) throw new Error("DD missing 'Category Specific Attributes' sheet");
+  var csaRows = XLSX.utils.sheet_to_json(csaWs, { header: 1, defval: "" });
+  if (csaRows.length < 2) throw new Error("Category Specific Attributes sheet appears empty");
+  var csaHdrs      = (csaRows[0] || []).map(function(h) { return String(h).trim(); });
+  var csaL4TypeIdx  = csaHdrs.indexOf("L4 Product Type");
+  var csaAttrDispIdx = csaHdrs.indexOf("Attribute Display Name");
+  var csaKvaVaIdx   = csaHdrs.indexOf("KVA / VA");
+  if (csaL4TypeIdx < 0 || csaAttrDispIdx < 0 || csaKvaVaIdx < 0)
+    throw new Error("Category Specific Attributes: missing 'L4 Product Type', 'Attribute Display Name', or 'KVA / VA' column");
+
+  var l4KvaMap = {};
+  for (var j = 1; j < csaRows.length; j++) {
+    if (String(csaRows[j][csaKvaVaIdx] || "").trim().toUpperCase() !== "KVA") continue;
+    var l4Type   = String(csaRows[j][csaL4TypeIdx]   || "").trim();
+    var attrDisp = String(csaRows[j][csaAttrDispIdx] || "").trim();
+    if (!l4Type || !attrDisp) continue;
+    var fieldId = dispToFieldId[attrDisp];
+    if (!fieldId) continue;
+    var key = l4Type.toLowerCase();
+    if (!l4KvaMap[key]) l4KvaMap[key] = [];
+    if (!l4KvaMap[key].some(function(k) { return k.fieldId === fieldId; }))
+      l4KvaMap[key].push({ fieldId: fieldId, displayName: attrDisp });
+  }
+  return l4KvaMap;
 }
 
 function parseQuoteSheet(wb) {
@@ -1715,6 +1774,10 @@ function showTemplateCached(key, label, statusId, dropId) {
       var taxResult = buildTaxonomyPathMap(wb);
       n = Object.keys(taxResult.pathMap).length;
       badge = n ? (n + " categories cached") : "loaded (no productTaxonomy categories)";
+    } else if (key === DD_KEY) {
+      if (!wb.Sheets["Attribute Master"]) throw new Error("missing Attribute Master sheet");
+      if (!wb.Sheets["Category Specific Attributes"]) throw new Error("missing Category Specific Attributes sheet");
+      badge = "loaded";
     } else {
       if (!wb.Sheets["Entities"]) throw new Error("no Entities sheet");
       var map = buildColMap(wb, "Entities");
@@ -1763,6 +1826,9 @@ async function handleTemplateFile(file, key, label, statusId, dropId) {
       if (!Object.keys(dmdMap).length) throw new Error("No attributes found in ATTRIBUTES sheet.");
     } else if (key === TAX_KEY) {
       if (!wb.Sheets["CATEGORIES"]) throw new Error("No CATEGORIES sheet — is this the taxonomy model export?");
+    } else if (key === DD_KEY) {
+      if (!wb.Sheets["Attribute Master"]) throw new Error("No 'Attribute Master' sheet — is this the Data Dictionary?");
+      if (!wb.Sheets["Category Specific Attributes"]) throw new Error("No 'Category Specific Attributes' sheet — is this the Data Dictionary?");
     } else {
       if (!wb.Sheets["Entities"]) throw new Error("No 'Entities' sheet — is this a Syndigo import template?");
       if (!Object.keys(buildColMap(wb, "Entities")).length)
@@ -1792,6 +1858,7 @@ async function handleInputFile(file) {
   var prodBuf = loadTemplateBuffer(PROD_TMPL_KEY);
   var skuBuf  = loadTemplateBuffer(SKU_TMPL_KEY);
   var dmdBuf  = loadTemplateBuffer(DMD_KEY);
+  var ddBuf   = loadTemplateBuffer(DD_KEY);
   if (!prodBuf || !skuBuf || !dmdBuf) {
     log("err", "Not all files are loaded — load product template, SKU template, and DMD in Step 1 first.");
     return;
@@ -1863,6 +1930,7 @@ async function handleInputFile(file) {
         products.forEach(function(p) {
           var raw = p["L4 Product Type"];
           if (raw) {
+            p._l4TypeRaw = raw;
             var path = taxPathMap[raw.toLowerCase()];
             if (path) p["L4 Product Type"] = path;
           }
@@ -1925,6 +1993,8 @@ async function handleInputFile(file) {
     var prodIdCi   = resolveOne(THG_PRODUCT_ID, dmdMap, prodMap);
     var prodTypeCi = prodMap["Type"];
     var prodNameCi = prodMap["Name"];
+    var variantShortNameCi  = prodMap["Variant Options.Attribute ShortName"];
+    var variantOptionNameCi = prodMap["Variant Options.Option Name"];
     auditInputHeaders(inputHeaders, resolvedProdCols, "Product", "product.xlsm", file.name).forEach(function(w) { log("warn", w); });
 
     log("ok", "Product columns resolved: <strong>" + resolvedProdCols.length + "</strong> mapped" +
@@ -1932,6 +2002,60 @@ async function handleInputFile(file) {
 
     state.productRows     = products.map(function(p) { return buildProductRow(p, resolvedProdCols, prodIdCi, prodTypeCi, prodNameCi); });
     state.prodTemplateBuf = prodBuf;
+
+    // Append KVA Variant Option rows from DD (optional)
+    if (!ddBuf) {
+      log("info", "KVA: no Data Dictionary loaded — Variant Option rows skipped");
+    } else if (variantShortNameCi === undefined || variantOptionNameCi === undefined) {
+      log("warn", "KVA: Variant Options columns not found in product template — rows skipped" +
+        " (ShortName ci=" + variantShortNameCi + ", OptionName ci=" + variantOptionNameCi + ")");
+    } else {
+      try {
+        var ddWb   = XLSX.read(ddBuf, { type: "array" });
+        var kvaMap = buildKvaMap(ddWb);
+        var kvaKeys = Object.keys(kvaMap);
+        log("info", "KVA map: <strong>" + kvaKeys.length + "</strong> L4 type(s) have KVA attributes" +
+          (kvaKeys.length ? " — e.g. " + escHtml(kvaKeys.slice(0,3).join(", ")) : ""));
+        var kvaAdded = 0;
+        var unmatchedL4 = [];
+        var expandedRows = [];
+        products.forEach(function(p, idx) {
+          var productRow = state.productRows[idx];
+          var l4Type = (p._l4TypeRaw || p["L4 Product Type"] || "").toLowerCase();
+          var kvas   = kvaMap[l4Type] || [];
+          if (!kvas.length && l4Type) unmatchedL4.push(l4Type);
+          // First KVA goes on the product row itself
+          if (kvas.length > 0) {
+            productRow[variantShortNameCi]  = kvas[0].fieldId;
+            productRow[variantOptionNameCi] = kvas[0].displayName;
+            kvaAdded++;
+          }
+          expandedRows.push(productRow);
+          // Remaining KVAs become extra rows
+          for (var k = 1; k < kvas.length; k++) {
+            var kvaRow = {};
+            if (prodIdCi !== undefined && p._productId) kvaRow[prodIdCi] = String(p._productId);
+            kvaRow[variantShortNameCi]  = kvas[k].fieldId;
+            kvaRow[variantOptionNameCi] = kvas[k].displayName;
+            expandedRows.push(kvaRow);
+            kvaAdded++;
+          }
+        });
+        state.productRows = expandedRows;
+        if (kvaAdded) {
+          log("ok", "KVA: <strong>" + kvaAdded + "</strong> Variant Option(s) written");
+        } else {
+          var uniq = unmatchedL4.filter(function(v,i,a){return a.indexOf(v)===i;});
+          log("warn", "DD loaded but no KVA matches. Input L4 type(s): <strong>" +
+            escHtml(uniq.join(", ") || "(none)") + "</strong>" +
+            (kvaKeys.length ? " | DD has: " + escHtml(kvaKeys.slice(0,5).join(", ")) : " | DD has no KVA types"));
+        }
+      } catch(e) {
+        log("warn", "DD parse error: " + escHtml(e.message) + " — KVA rows skipped");
+        console.error(e);
+      }
+    }
+
     log("ok", "Products: <strong>" + products.length + "</strong> rows ready");
   } catch(e) { log("err", "Product build failed: " + escHtml(e.message)); console.error(e); return; }
 
@@ -2070,6 +2194,9 @@ setupDropZone("dmd-drop", "dmd-input", function(f) {
 setupDropZone("tax-drop", "tax-input", function(f) {
   handleTemplateFile(f, TAX_KEY, "full taxonomy model.xlsx", "tax-status", "tax-drop");
 });
+setupDropZone("dd-drop", "dd-input", function(f) {
+  handleTemplateFile(f, DD_KEY, "Data Dictionary.xlsx", "dd-status", "dd-drop");
+});
 setupDropZone("input-drop", "input-file-input", handleInputFile);
 
 // ============================================================
@@ -2081,6 +2208,7 @@ setupDropZone("input-drop", "input-file-input", handleInputFile);
   showTemplateCached(SKU_TMPL_KEY,  "SKU.xlsm",                  "sku-tmpl-status",  "sku-tmpl-drop");
   showTemplateCached(DMD_KEY,       "thing data model.xlsx",     "dmd-status",       "dmd-drop");
   showTemplateCached(TAX_KEY,       "full taxonomy model.xlsx",  "tax-status",       "tax-drop");
+  showTemplateCached(DD_KEY,        "Data Dictionary.xlsx",  "dd-status",        "dd-drop");
   checkTemplatesReady();
 }());
 </script>
