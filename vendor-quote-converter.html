@@ -286,6 +286,16 @@
         <input type="file" id="dd-input" accept=".xlsx,.xlsm">
         <div class="file-status" id="dd-status"></div>
       </div>
+      <div class="tmpl-slot">
+        <label>Syndigo Product Export <span style="font-weight:400;font-size:0.85em;color:#888">(optional — for KVA supplement UUIDs)</span></label>
+        <div class="drop-zone" id="export-drop">
+          <div class="drop-icon">🔗</div>
+          <strong>Syndigo product export.xlsm</strong>
+          Click or drag to load
+        </div>
+        <input type="file" id="export-input" accept=".xlsx,.xlsm">
+        <div class="file-status" id="export-status"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -319,6 +329,7 @@
     <div class="dl-row">
       <button class="btn-dl btn-dl-prod" id="btn-dl-products" disabled>&#8595; Download Products</button>
       <button class="btn-dl btn-dl-sku"  id="btn-dl-skus"     disabled>&#8595; Download SKUs</button>
+      <button class="btn-dl btn-dl-prod" id="btn-dl-kva-supplement" disabled style="display:none">&#8595; Download KVA Supplement</button>
     </div>
   </div>
 </div>
@@ -379,6 +390,7 @@ const SKU_TMPL_KEY  = "syndigo_sku_tmpl_v2";
 const DMD_KEY       = "syndigo_dmd_v2";
 const TAX_KEY       = "syndigo_tax_v1";
 const DD_KEY        = "syndigo_dd_v1";
+const EXPORT_KEY        = "syndigo_export_v1";
 
 // src  = register/quote column header (input file)
 // thg  = Syndigo attribute short name (stable canonical ID, looked up in DMD)
@@ -757,6 +769,13 @@ function resolveColumns(columns, dmdMap, dmdGroupMap, dmdMandatoryMap, templateC
     }
     var ci = templateColMap[dispName];
     if (ci === undefined) {
+      // Normalized fallback — handles case and spacing differences (e.g. "oz / mL" vs "oz/mL")
+      var norm = normalizeHeader(dispName);
+      for (var k in templateColMap) {
+        if (normalizeHeader(k) === norm) { ci = templateColMap[k]; break; }
+      }
+    }
+    if (ci === undefined) {
       // Valid DMD field — will be appended to the output file as a new column
       appended.push({
         src: col.src, thg: col.thg, dispName: dispName,
@@ -771,10 +790,19 @@ function resolveColumns(columns, dmdMap, dmdGroupMap, dmdMandatoryMap, templateC
   return { resolved: resolved, appended: appended, warnings: warnings };
 }
 
+function normalizeHeader(s) {
+  return s.toLowerCase().replace(/\s+/g, ' ').replace(/\s*\/\s*/g, '/').trim();
+}
+
 function resolveOne(thgKey, dmdMap, colMap) {
   var dispName = dmdMap[thgKey];
   if (!dispName) return undefined;
-  return colMap[dispName];
+  if (colMap[dispName] !== undefined) return colMap[dispName];
+  var norm = normalizeHeader(dispName);
+  for (var k in colMap) {
+    if (normalizeHeader(k) === norm) return colMap[k];
+  }
+  return undefined;
 }
 
 // auditInputHeaders: templateFile and inputFileName shown in warnings
@@ -886,6 +914,41 @@ function detectQuoteSheet(wb) {
   return { name: wb.SheetNames[0], format: "General" };
 }
 
+// Build BBB Product ID → Syndigo UUID map from a product export's Entities sheet.
+function buildUuidMap(wb) {
+  var ws = wb.Sheets["Entities"];
+  if (!ws) throw new Error("No Entities sheet in export");
+  var rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+  if (rows.length < 1) throw new Error("Entities sheet is empty");
+  var uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  var uuidIdx = -1, pidIdx = -1, dataStart = 0;
+  // Try header row first (scan first 5 rows for "ID" column label)
+  for (var r = 0; r < Math.min(5, rows.length); r++) {
+    var cands = (rows[r] || []).map(function(h) { return String(h).trim(); });
+    var ui = cands.indexOf("ID");
+    if (ui >= 0) {
+      var pi = cands.indexOf("Product ID");
+      if (pi < 0) pi = cands.indexOf("Name");
+      if (pi >= 0) { uuidIdx = ui; pidIdx = pi; dataStart = r + 1; break; }
+    }
+  }
+  // Fallback: headerless export — find UUID column by pattern in first row
+  if (uuidIdx < 0) {
+    var first = (rows[0] || []).map(function(c) { return String(c).trim(); });
+    for (var c = 0; c < first.length; c++) {
+      if (uuidRe.test(first[c])) { uuidIdx = c; pidIdx = c + 1; dataStart = 0; break; }
+    }
+  }
+  if (uuidIdx < 0) throw new Error("Export: could not find UUID column — is this a Syndigo product export?");
+  var map = {};
+  for (var i = dataStart; i < rows.length; i++) {
+    var uuid = String(rows[i][uuidIdx] || "").trim();
+    var pid  = String(rows[i][pidIdx]  || "").trim();
+    if (uuidRe.test(uuid) && pid && !map[pid]) map[pid] = uuid;
+  }
+  return map;
+}
+
 // Build L4ProductType (lowercase) → [{fieldId, displayName}] map for KVA rows.
 // Discovers column positions by header name — no hardcoded indices.
 function buildKvaMap(ddWb) {
@@ -992,7 +1055,7 @@ function buildProductRow(product, resolvedCols, prodIdCi, prodTypeCi, prodNameCi
 
 function buildSKURow(sku, resolvedCols, skuIdCi, skuProdIdCi, skuTypeCi, skuNameCi, skuSeqCi, seqNum) {
   var cells = {};
-  if (skuSeqCi    !== undefined && seqNum)          cells[skuSeqCi]    = String(seqNum);
+  if (skuSeqCi !== undefined) cells[skuSeqCi] = String(seqNum);
   if (skuTypeCi   !== undefined)                    cells[skuTypeCi]   = "sku";
   if (skuNameCi   !== undefined && sku._productId)  cells[skuNameCi]   = String(sku._productId);
   if (skuIdCi     !== undefined && sku._skuId)      cells[skuIdCi]     = String(sku._skuId);
@@ -1533,6 +1596,109 @@ async function updateRefDataTaxPaths(zip, paths) {
   zip.file("xl/workbook.xml", wbXml);
 }
 
+// The KVA supplement carries only these attribute groups. Every other group is stripped
+// from the output — Syndigo throws NPEs when it receives the remaining attribute columns
+// as empty values on import.
+var KVA_KEEP_GROUPS = ["system attributes", "enhancer attribute(s)", "matching attribute(s)", "shopify"];
+
+// Drop every column outside keepSet from a worksheet XML, remapping the survivors to
+// contiguous positions via ciMap (oldCi → newCi).
+function stripColumnsXml(wsXml, keepSet, ciMap) {
+  // Cells — drop those outside the keep set, remap the rest
+  wsXml = wsXml.replace(/<c\b[^>]*(?:\/>|>[\s\S]*?<\/c>)/g, function(cell) {
+    var rm = cell.match(/\br="([A-Z]+)(\d+)"/);
+    if (!rm) return cell;
+    var ci = XLSX.utils.decode_col(rm[1]);
+    if (!keepSet[ci]) return "";
+    return cell.replace(/\br="[A-Z]+(\d+)"/, 'r="' + XLSX.utils.encode_col(ciMap[ci]) + '$1"');
+  });
+
+  // Merges — keep only those falling entirely inside the keep set
+  wsXml = wsXml.replace(/<mergeCell\b[^>]*\/>/g, function(mc) {
+    var rm = mc.match(/ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"/);
+    if (!rm) return mc;
+    var c1 = XLSX.utils.decode_col(rm[1]), c2 = XLSX.utils.decode_col(rm[3]);
+    for (var c = c1; c <= c2; c++) if (!keepSet[c]) return "";
+    return '<mergeCell ref="' + XLSX.utils.encode_col(ciMap[c1]) + rm[2] + ':' +
+                                XLSX.utils.encode_col(ciMap[c2]) + rm[4] + '"/>';
+  });
+  var mergeCount = (wsXml.match(/<mergeCell\b/g) || []).length;
+  if (mergeCount) {
+    wsXml = wsXml.replace(/<mergeCells\b[^>]*?count="\d+"/, '<mergeCells count="' + mergeCount + '"');
+  } else {
+    wsXml = wsXml.replace(/<mergeCells\b[^>]*>[\s\S]*?<\/mergeCells>/, "")
+                 .replace(/<mergeCells\b[^>]*\/>/, "");
+  }
+
+  // Row spans still advertise the pre-strip width — retarget them to the kept range
+  var keptCount = 0;
+  for (var k in keepSet) if (keepSet[k]) keptCount++;
+  wsXml = wsXml.replace(/(<row\b[^>]*?)\bspans="\d+:\d+"/g, function(m, head) {
+    return head + 'spans="1:' + keptCount + '"';
+  });
+
+  // <col> width definitions — collapse each span onto its surviving columns
+  wsXml = wsXml.replace(/<col\b[^>]*\/>/g, function(col) {
+    var mn = col.match(/\bmin="(\d+)"/), mx = col.match(/\bmax="(\d+)"/);
+    if (!mn || !mx) return col;
+    var kept = [];
+    for (var c = parseInt(mn[1]) - 1; c <= parseInt(mx[1]) - 1; c++) {
+      if (keepSet[c]) kept.push(ciMap[c]);
+    }
+    if (!kept.length) return "";
+    return col.replace(/\bmin="\d+"/, 'min="' + (Math.min.apply(null, kept) + 1) + '"')
+              .replace(/\bmax="\d+"/, 'max="' + (Math.max.apply(null, kept) + 1) + '"');
+  });
+
+  return wsXml;
+}
+
+// Build the KVA supplement with only KVA_KEEP_GROUPS present.
+async function buildKvaOutputBuffer(templateBuf, kvaRows) {
+  var wb = XLSX.read(templateBuf, { type: "array" });
+  var ws = wb.Sheets["Entities"];
+  if (!ws) throw new Error("Product template has no Entities sheet");
+
+  var bounds  = buildGroupBounds(ws);
+  var keepSet = {}, keepList = [], missing = [];
+  KVA_KEEP_GROUPS.forEach(function(g) {
+    var b = bounds[g];
+    if (!b) { missing.push(g); return; }
+    for (var c = b.start; c <= b.end; c++) {
+      if (!keepSet[c]) { keepSet[c] = true; keepList.push(c); }
+    }
+  });
+  if (!keepList.length)
+    throw new Error("None of the required attribute groups were found in the product template");
+  keepList.sort(function(a, b) { return a - b; });
+
+  var ciMap = {};
+  keepList.forEach(function(oldCi, i) { ciMap[oldCi] = i; });
+
+  // Remap row cells onto the new contiguous positions, dropping stripped columns
+  var remapped = kvaRows.map(function(row) {
+    var out = {};
+    Object.keys(row).forEach(function(ci) {
+      if (ciMap[ci] !== undefined) out[ciMap[ci]] = row[ci];
+    });
+    return out;
+  });
+
+  var zip = await JSZip.loadAsync(templateBuf);
+  var entitiesPath = await findSheetPath(zip, "Entities");
+  if (entitiesPath) {
+    var fullPath = "xl/" + entitiesPath;
+    var xml = await zip.file(fullPath).async("string");
+    xml = stripColumnsXml(xml, keepSet, ciMap);
+    xml = replaceDataRowsXml(xml, remapped, []);
+    xml = updateSheetDimension(xml, keepList.length - 1, lastNonEmptyRow(remapped));
+    zip.file(fullPath, xml);
+  }
+
+  var buf = await zip.generateAsync({ type: "arraybuffer", compression: "DEFLATE", compressionOptions: { level: 6 } });
+  return { buf: buf, kept: keepList.length, missing: missing };
+}
+
 async function buildOutputBuffer(templateBuf, entityRows, relRows, appendedEntityCols, l4Paths) {
   var zip = await JSZip.loadAsync(templateBuf);
 
@@ -1778,6 +1944,12 @@ function showTemplateCached(key, label, statusId, dropId) {
       if (!wb.Sheets["Attribute Master"]) throw new Error("missing Attribute Master sheet");
       if (!wb.Sheets["Category Specific Attributes"]) throw new Error("missing Category Specific Attributes sheet");
       badge = "loaded";
+    } else if (key === EXPORT_KEY) {
+      if (!wb.Sheets["Entities"]) throw new Error("missing Entities sheet — is this a Syndigo product export?");
+      var uuidMap = buildUuidMap(wb);
+      n = Object.keys(uuidMap).length;
+      if (!n) throw new Error("No UUID→Product ID mappings found in export");
+      badge = n + " product UUID(s) cached";
     } else {
       if (!wb.Sheets["Entities"]) throw new Error("no Entities sheet");
       var map = buildColMap(wb, "Entities");
@@ -1829,6 +2001,10 @@ async function handleTemplateFile(file, key, label, statusId, dropId) {
     } else if (key === DD_KEY) {
       if (!wb.Sheets["Attribute Master"]) throw new Error("No 'Attribute Master' sheet — is this the Data Dictionary?");
       if (!wb.Sheets["Category Specific Attributes"]) throw new Error("No 'Category Specific Attributes' sheet — is this the Data Dictionary?");
+    } else if (key === EXPORT_KEY) {
+      if (!wb.Sheets["Entities"]) throw new Error("No 'Entities' sheet — is this a Syndigo product export?");
+      var uuidCheck = buildUuidMap(wb);
+      if (!Object.keys(uuidCheck).length) throw new Error("No UUID→Product ID mappings found — check this is a Syndigo product export.");
     } else {
       if (!wb.Sheets["Entities"]) throw new Error("No 'Entities' sheet — is this a Syndigo import template?");
       if (!Object.keys(buildColMap(wb, "Entities")).length)
@@ -1990,9 +2166,10 @@ async function handleInputFile(file) {
     });
     state.appendedProdCols = appendedProdCols;
 
-    var prodIdCi   = resolveOne(THG_PRODUCT_ID, dmdMap, prodMap);
-    var prodTypeCi = prodMap["Type"];
-    var prodNameCi = prodMap["Name"];
+    var prodIdCi       = resolveOne(THG_PRODUCT_ID, dmdMap, prodMap);
+    var prodTypeCi     = prodMap["Type"];
+    var prodNameCi     = prodMap["Name"];
+    var prodEntityIdCi = prodMap["ID"];
     var variantShortNameCi  = prodMap["Variant Options.Attribute ShortName"];
     var variantOptionNameCi = prodMap["Variant Options.Option Name"];
     auditInputHeaders(inputHeaders, resolvedProdCols, "Product", "product.xlsm", file.name).forEach(function(w) { log("warn", w); });
@@ -2003,7 +2180,21 @@ async function handleInputFile(file) {
     state.productRows     = products.map(function(p) { return buildProductRow(p, resolvedProdCols, prodIdCi, prodTypeCi, prodNameCi); });
     state.prodTemplateBuf = prodBuf;
 
+    // Build UUID map from Syndigo export (optional — needed for KVA supplement)
+    var exportBuf = loadTemplateBuffer(EXPORT_KEY);
+    var uuidMap = {};
+    if (exportBuf) {
+      try {
+        var exportWb = XLSX.read(exportBuf, { type: "array" });
+        uuidMap = buildUuidMap(exportWb);
+        log("info", "Syndigo export: <strong>" + Object.keys(uuidMap).length + "</strong> UUID(s) loaded");
+      } catch(e) {
+        log("warn", "Syndigo export parse error: " + escHtml(e.message) + " — UUIDs skipped");
+      }
+    }
+
     // Append KVA Variant Option rows from DD (optional)
+    state.kvaRows = [];
     if (!ddBuf) {
       log("info", "KVA: no Data Dictionary loaded — Variant Option rows skipped");
     } else if (variantShortNameCi === undefined || variantOptionNameCi === undefined) {
@@ -2018,32 +2209,41 @@ async function handleInputFile(file) {
           (kvaKeys.length ? " — e.g. " + escHtml(kvaKeys.slice(0,3).join(", ")) : ""));
         var kvaAdded = 0;
         var unmatchedL4 = [];
-        var expandedRows = [];
         products.forEach(function(p, idx) {
           var productRow = state.productRows[idx];
           var l4Type = (p._l4TypeRaw || p["L4 Product Type"] || "").toLowerCase();
           var kvas   = kvaMap[l4Type] || [];
           if (!kvas.length && l4Type) unmatchedL4.push(l4Type);
-          // First KVA goes on the product row itself
+          // First KVA goes on the product row itself (placeholder for single-KVA products)
           if (kvas.length > 0) {
             productRow[variantShortNameCi]  = kvas[0].fieldId;
             productRow[variantOptionNameCi] = kvas[0].displayName;
             kvaAdded++;
           }
-          expandedRows.push(productRow);
-          // Remaining KVAs become extra rows
-          for (var k = 1; k < kvas.length; k++) {
-            var kvaRow = {};
-            if (prodIdCi !== undefined && p._productId) kvaRow[prodIdCi] = String(p._productId);
-            kvaRow[variantShortNameCi]  = kvas[k].fieldId;
-            kvaRow[variantOptionNameCi] = kvas[k].displayName;
-            expandedRows.push(kvaRow);
-            kvaAdded++;
+          // Multi-KVA products: supplement contains ALL KVAs (from k=0) so it replaces
+          // the placeholder with the full correct set in one import pass.
+          var uuid = uuidMap[String(p._productId || "")] || "";
+          if (kvas.length > 1) {
+            for (var k = 0; k < kvas.length; k++) {
+              var kvaRow = {};
+              if (prodEntityIdCi !== undefined && uuid) kvaRow[prodEntityIdCi] = uuid;
+              if (prodTypeCi !== undefined) kvaRow[prodTypeCi] = "product";
+              if (prodNameCi !== undefined && p._productId) kvaRow[prodNameCi] = String(p._productId);
+              if (prodIdCi   !== undefined && p._productId) kvaRow[prodIdCi]   = String(p._productId);
+              kvaRow[variantShortNameCi]  = kvas[k].fieldId;
+              kvaRow[variantOptionNameCi] = kvas[k].displayName;
+              state.kvaRows.push(kvaRow);
+            }
+            kvaAdded += kvas.length - 1;
           }
         });
-        state.productRows = expandedRows;
         if (kvaAdded) {
-          log("ok", "KVA: <strong>" + kvaAdded + "</strong> Variant Option(s) written");
+          var suppCount = state.kvaRows.length;
+          var uuidCoverage = suppCount ? state.kvaRows.filter(function(r) { return prodEntityIdCi !== undefined && r[prodEntityIdCi]; }).length : 0;
+          state.kvaRowsWithUuid = uuidCoverage;
+          log("ok", "KVA: <strong>" + kvaAdded + "</strong> Variant Option(s) written" +
+            (suppCount ? " — <strong>" + suppCount + "</strong> in supplement" +
+              (uuidCoverage < suppCount ? " (<strong>" + (suppCount - uuidCoverage) + "</strong> missing UUID — load Syndigo export)" : " with UUIDs") : ""));
         } else {
           var uniq = unmatchedL4.filter(function(v,i,a){return a.indexOf(v)===i;});
           log("warn", "DD loaded but no KVA matches. Input L4 type(s): <strong>" +
@@ -2106,21 +2306,39 @@ async function handleInputFile(file) {
     auditInputHeaders(inputHeaders, resolvedSkuCols, "SKU", "SKU.xlsm", file.name).forEach(function(w) { log("warn", w); });
 
     log("ok", "SKU columns resolved: <strong>" + resolvedSkuCols.length + "</strong> mapped" +
-      (appendedSkuCols.length ? " (<strong>" + appendedSkuCols.length + "</strong> appended)" : ""));
+      (appendedSkuCols.length ? " (<strong>" + appendedSkuCols.length + "</strong> appended)" : "") +
+      " — SKU ID ci=" + skuIdCi + ", Product ID ci=" + skuProdIdCi);
 
     var skuSeqCi = skuMap["ID"];
     state.skuRows = allSkus.map(function(s, idx) { return buildSKURow(s, resolvedSkuCols, skuIdCi, skuProdIdCi, skuTypeCi, skuNameCi, skuSeqCi, idx + 1); });
     state.skuTemplateBuf = skuBuf;
 
-    if (registerFlow && Object.keys(relMap).length) {
-      state.skuRelRows = buildRelRows(relMap, allSkus);
-      log("ok", "Relationships: <strong>" + allSkus.length + "</strong> rows (register flow)");
-    }
+    state.skuRelRows = allSkus.map(function(s, idx) {
+      var relRow = {};
+      var seqNum    = String(idx + 1);
+      var productId = String(s._productId || "");
+      var productUuid = uuidMap[productId] || "";
+      if (relMap["Type"]            !== undefined) relRow[relMap["Type"]]            = "sku@@Product";
+      if (relMap["ID"]              !== undefined) relRow[relMap["ID"]]              = seqNum;
+      if (relMap["Name"]            !== undefined) relRow[relMap["Name"]]            = productId;
+      if (relMap["Related to Type"] !== undefined) relRow[relMap["Related to Type"]] = "product";
+      if (relMap["Product ID"]      !== undefined) relRow[relMap["Product ID"]]      = productId;
+      if (relMap["Related to ID"]   !== undefined && productUuid) relRow[relMap["Related to ID"]] = productUuid;
+      return relRow;
+    });
     log("ok", "SKUs: <strong>" + allSkus.length + "</strong> rows ready");
   } catch(e) { log("err", "SKU build failed: " + escHtml(e.message)); console.error(e); return; }
 
   document.getElementById("btn-dl-products").disabled = false;
   document.getElementById("btn-dl-skus").disabled     = false;
+  var kvaSuppBtn = document.getElementById("btn-dl-kva-supplement");
+  if (state.kvaRows && state.kvaRows.length && state.kvaRowsWithUuid) {
+    kvaSuppBtn.style.display = "";
+    kvaSuppBtn.disabled = false;
+  } else {
+    kvaSuppBtn.style.display = "none";
+    kvaSuppBtn.disabled = true;
+  }
   setStatus("input-status", "ok", "&#x2713; " + escHtml(file.name) + " — " +
     products.length + " products, " + allSkus.length + " SKUs ready");
 }
@@ -2161,6 +2379,27 @@ document.getElementById("btn-dl-skus").addEventListener("click", async function(
   this.textContent = "↓ Download SKUs";
 });
 
+document.getElementById("btn-dl-kva-supplement").addEventListener("click", async function() {
+  if (!state.kvaRows || !state.kvaRows.length || !state.prodTemplateBuf) return;
+  this.disabled = true;
+  this.textContent = "Building…";
+  try {
+    var kva = await buildKvaOutputBuffer(state.prodTemplateBuf, state.kvaRows);
+    var buf = kva.buf;
+    log("ok", "KVA supplement: <strong>" + kva.kept + "</strong> columns kept (" +
+      escHtml(KVA_KEEP_GROUPS.join(", ")) + ") — all other attribute groups stripped");
+    if (kva.missing.length)
+      log("warn", "KVA supplement: group(s) not found in product template — " + escHtml(kva.missing.join(", ")));
+    var ts = new Date().toISOString().replace(/[-:]/g, "").replace("T", "_").slice(0, 15);
+    downloadBuf(buf, "Syndigo_KVA_Supplement_" + ts + ".xlsm");
+  } catch(e) {
+    log("err", "Supplement download failed: " + escHtml(e.message));
+    console.error(e);
+  }
+  this.disabled = false;
+  this.textContent = "↓ Download KVA Supplement";
+});
+
 // ============================================================
 // DROP ZONES
 // ============================================================
@@ -2197,6 +2436,9 @@ setupDropZone("tax-drop", "tax-input", function(f) {
 setupDropZone("dd-drop", "dd-input", function(f) {
   handleTemplateFile(f, DD_KEY, "Data Dictionary.xlsx", "dd-status", "dd-drop");
 });
+setupDropZone("export-drop", "export-input", function(f) {
+  handleTemplateFile(f, EXPORT_KEY, "Syndigo export.xlsm", "export-status", "export-drop");
+});
 setupDropZone("input-drop", "input-file-input", handleInputFile);
 
 // ============================================================
@@ -2209,6 +2451,7 @@ setupDropZone("input-drop", "input-file-input", handleInputFile);
   showTemplateCached(DMD_KEY,       "thing data model.xlsx",     "dmd-status",       "dmd-drop");
   showTemplateCached(TAX_KEY,       "full taxonomy model.xlsx",  "tax-status",       "tax-drop");
   showTemplateCached(DD_KEY,        "Data Dictionary.xlsx",  "dd-status",        "dd-drop");
+  showTemplateCached(EXPORT_KEY,    "Syndigo export.xlsm",       "export-status",    "export-drop");
   checkTemplatesReady();
 }());
 </script>
