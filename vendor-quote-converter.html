@@ -699,17 +699,23 @@ function buildTaxonomyPathMap(wb) {
 // hardcoded rename table so the same source column is never mapped twice.
 function autoMatchHeaders(inputHeaders, templateColMap, dmdReverse) {
   // Normalized index for template display names
-  var tmplNormToDisp = {};
+  // A normalized key claimed by more than one display name (e.g. "Volume" from both
+  // "Volume" and "Volume (Cubic Ft)") is ambiguous: it is disqualified from the
+  // normalized tiers and left to the hardcoded rename table, which names the
+  // attribute explicitly. Otherwise insertion order would silently decide the binding.
+  var tmplNormToDisp = {}, tmplNormAmbig = {};
   Object.keys(templateColMap).forEach(function(d) {
     var n = normHeader(d);
-    if (!tmplNormToDisp[n]) tmplNormToDisp[n] = d;
+    if (tmplNormToDisp[n] === undefined) tmplNormToDisp[n] = d;
+    else if (tmplNormToDisp[n] !== d) tmplNormAmbig[n] = true;
   });
   // Normalized index for DMD display names
-  var dmdExact = {}, dmdNormToDisp = {};
+  var dmdExact = {}, dmdNormToDisp = {}, dmdNormAmbig = {};
   Object.keys(dmdReverse.dispToGroup).forEach(function(d) {
     dmdExact[d] = true;
     var n = normHeader(d);
-    if (!dmdNormToDisp[n]) dmdNormToDisp[n] = d;
+    if (dmdNormToDisp[n] === undefined) dmdNormToDisp[n] = d;
+    else if (dmdNormToDisp[n] !== d) dmdNormAmbig[n] = true;
   });
 
   var resolved = [], appended = [];
@@ -727,7 +733,7 @@ function autoMatchHeaders(inputHeaders, templateColMap, dmdReverse) {
       return;
     }
     // 2. Normalized match in template (e.g. "Pallet Weight (kg)" → template col "Pallet Weight")
-    var tmplDisp = tmplNormToDisp[norm];
+    var tmplDisp = tmplNormAmbig[norm] ? undefined : tmplNormToDisp[norm];
     if (tmplDisp && templateColMap[tmplDisp] !== undefined && !usedDisp[tmplDisp]) {
       usedDisp[tmplDisp] = matchedSrcs[h] = true;
       resolved.push({ src: h, thg: null, dispName: tmplDisp, ci: templateColMap[tmplDisp], level: null });
@@ -741,6 +747,12 @@ function autoMatchHeaders(inputHeaders, templateColMap, dmdReverse) {
       return;
     }
     // 4. Normalized match in DMD
+    if (dmdNormAmbig[norm]) {
+      log("info", "Auto-match: &ldquo;" + escHtml(h) + "&rdquo; normalizes to &ldquo;" +
+        escHtml(norm) + "&rdquo;, which matches more than one attribute — " +
+        "left to the rename table to resolve explicitly");
+      return;
+    }
     var dmdDisp = dmdNormToDisp[norm];
     if (dmdDisp && !usedDisp[dmdDisp]) {
       usedDisp[dmdDisp] = matchedSrcs[h] = true;
