@@ -88,10 +88,17 @@
   .tmpl-grid {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
+    grid-auto-rows: 1fr;      /* both rows the same height, so all six slots match */
     gap: 14px;
   }
-  .tmpl-slot {}
+  .tmpl-slot { display: flex; flex-direction: column; }
   .tmpl-slot label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .04em; }
+  /* Reserve two label lines so the zones below start at the same y, and give the zone and
+     the loaded-file strip one shared height so every slot is the same box either way. */
+  .tmpl-slot > label { min-height: 55px; }   /* two lines — the longest labels wrap */
+  .tmpl-slot > .drop-zone,
+  .tmpl-slot > .file-status { flex: 1 1 auto; min-height: 104px; margin-top: 0; box-sizing: border-box; }
+  .tmpl-slot > .drop-zone { display: flex; flex-direction: column; align-items: center; justify-content: center; }
 
   .drop-zone {
     border: 2px dashed var(--border);
@@ -131,16 +138,6 @@
   }
   .drop-zone-lg .drop-icon { font-size: 28px; margin-bottom: 8px; }
   .drop-zone-lg strong { display: block; color: var(--text); font-size: 14px; margin-bottom: 4px; }
-
-  .format-hint {
-    margin-top: 12px;
-    padding: 10px 14px;
-    background: var(--info-lt);
-    border-radius: 6px;
-    border-left: 3px solid var(--info);
-    font-size: 12px;
-    color: var(--info);
-  }
 
   /* File status strip */
   .file-status {
@@ -190,14 +187,34 @@
     border-bottom: 1px solid var(--border);
     background: #fafbfc;
     font-size: 14px; font-weight: 600;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
   }
+  .log-summary { font-size: 12px; font-weight: 500; color: var(--muted); }
+  .log-summary.has-warn { color: var(--warn); font-weight: 600; }
 
-  #log-list { list-style: none; padding: 12px 16px; display: flex; flex-direction: column; gap: 4px; }
-  #log-list li { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; padding: 4px 8px; border-radius: 5px; }
-  #log-list li.ok   { background: var(--ok-lt);   color: var(--ok);   }
-  #log-list li.warn { background: var(--warn-lt); color: var(--warn); }
-  #log-list li.err  { background: var(--err-lt);  color: var(--err);  }
-  #log-list li.info { background: var(--info-lt); color: var(--info); }
+  /* Grouped log: warnings and results are always visible, the running commentary is
+     folded away so the things that need a decision are not buried in it. */
+  #log-groups { padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; }
+  .log-group { border: 0; }
+  .log-group-title {
+    margin: 0 0 6px; font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .05em; color: var(--muted);
+  }
+  .log-group-title.warn { color: var(--warn); }
+  details.log-group > summary.log-group-title {
+    cursor: pointer; user-select: none; list-style: none; display: flex; align-items: center; gap: 6px;
+  }
+  details.log-group > summary.log-group-title::-webkit-details-marker { display: none; }
+  details.log-group > summary.log-group-title::before { content: "\25B8"; font-size: 10px; }
+  details.log-group[open] > summary.log-group-title::before { content: "\25BE"; }
+  details.log-group > summary.log-group-title:hover { color: var(--accent); }
+
+  .log-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
+  .log-list li { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; padding: 4px 8px; border-radius: 5px; }
+  .log-list li.ok   { background: var(--ok-lt);   color: var(--ok);   }
+  .log-list li.warn { background: var(--warn-lt); color: var(--warn); }
+  .log-list li.err  { background: var(--err-lt);  color: var(--err);  }
+  .log-list li.info { background: var(--info-lt); color: var(--info); }
 
   .dl-row {
     padding: 16px 20px;
@@ -317,10 +334,6 @@
       <strong>Drop your file here</strong>
       Click to browse &mdash; or drag &amp; drop
     </div>
-    <div class="format-hint">
-      Accepts: <strong>Master SKU Register</strong> (must have an "Issued" sheet) &nbsp;&middot;&nbsp;
-      <strong>Vendor Quote Sheet</strong> (General or Kitchen &amp; Dining format)
-    </div>
     <input type="file" id="input-file-input" accept=".xlsx,.xlsm,.xls">
     <div class="file-status" id="input-status"></div>
   </div>
@@ -329,8 +342,11 @@
 <!-- RESULTS -->
 <div id="results-panel">
   <div class="results-card">
-    <div class="results-header">Conversion Log</div>
-    <ul id="log-list"></ul>
+    <div class="results-header">
+      <span>Conversion Log</span>
+      <span class="log-summary" id="log-summary"></span>
+    </div>
+    <div id="log-groups"></div>
     <div class="dl-row">
       <button class="btn-dl btn-dl-prod" id="btn-dl-products" disabled>&#8595; Download Products</button>
       <button class="btn-dl btn-dl-sku"  id="btn-dl-skus"     disabled>&#8595; Download SKUs</button>
@@ -392,8 +408,8 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 const RELATIONSHIP_TYPE = "sku@@Product";
 // Bump on every change that gets pushed. Shown next to the page title so you can confirm
 // at a glance which build the browser is actually running.
-const APP_VERSION = "1.6.0";
-const APP_BUILT   = "2026-09-14";
+const APP_VERSION = "2.3.0";
+const APP_BUILT   = "2026-09-16";
 
 const PROD_TMPL_KEY = "syndigo_prod_tmpl_v2";
 const SKU_TMPL_KEY  = "syndigo_sku_tmpl_v2";
@@ -402,82 +418,40 @@ const TAX_KEY       = "syndigo_tax_v1";
 const DD_KEY        = "syndigo_dd_v1";
 const EXPORT_KEY        = "syndigo_export_v1";
 
-// src  = register/quote column header (input file)
-// thg  = Syndigo attribute short name (stable canonical ID, looked up in DMD)
-// Display name is resolved at runtime: thg → DMD → displayName → template column index
-const PRODUCT_COLUMNS = [
-  { src: "Brand Name",                      thg: "thgbrandname"              },
-  { src: "Product Name",                    thg: "thgproductname"            },
-  { src: "Product Description (Long)",      thg: "thgproductdescriptionlong" },
-  { src: "Key Features & Benefits",         thg: "thgkeyfeaturesbenefits"    },
-  { src: "Primary Material",                thg: "thgprimarymaterial"        },
-  { src: "Material Details",                thg: "thgmaterialdetails"        },
-  { src: "Product Class",                   thg: "thgproductclass"           },
-  { src: "L4 Product Type",                 thg: "thgl4hierarchynode"        },
-  { src: "Safety Certifications",           thg: "thgsafetycertifications"   },
-  { src: "Sustainability Certs",            thg: "thgsustainabilitycerts"    },
-  { src: "Regulatory Compliance",           thg: "thgregulatorycompliance"   },
-  { src: "Labeling Compliance",             thg: "thglabelingcompliance"     },
-  { src: "Packaging Type",                  thg: "thgpackagingtype"          },
-  { src: "Unit Weight (kg)",                thg: "thgunitweight"             },
-  { src: "Units per Case",                  thg: "thgunitspercase"           },
-  { src: "Case Weight (kg)",                thg: "thgcaseweight"             },
-  { src: "MSRP CAD",                        thg: "thgmsrpcad"                },
-  { src: "Unit Cost",                       thg: "thgunitcost"               },
-  { src: "MOQ",                             thg: "thgmoq"                    },
-  { src: "Quote Currency",                  thg: "thgpaymentcurrency"        },
-  { src: "Drop Ship (Y/N)",                 thg: "thgdropship"               },
-  { src: "Bulk Order Lead Time (days)",     thg: "thgbulkleadtime"           },
-  { src: "FOB Location",                    thg: "thgfoblocation"            },
-  { src: "Warranty Duration",               thg: "thgwarrantyduration"       },
-  { src: "Warranty Policy Details",         thg: "thgwarrantypolicydetails"  },
-  { src: "Return Products to Vendor (Y/N)", thg: "thgrmareturnsprocedure"    },
-  { src: "MAP Policy (Y/N)",                thg: "thgmap"                    },
-  { src: "Payment Terms",                   thg: "thgpaymentterms"           },
-  { src: "Country of Origin",               thg: "thgcountryoforigin"        },
-  { src: "Customer Support Contact",        thg: "thgcustomersupportcontact" },
+// Register bookkeeping columns. Present to help users navigate the register; they have no
+// counterpart in the data model and are deliberately not mapped.
+const REGISTER_IGNORE = [
+  "Group Key", "Locked?", "BBB Product ID", "BBB SKU ID", "Prefix", "Status", "Row #",
+  "BB&B SKU #", "Date Issued", "Issued By", "Sub-Category"
 ];
 
-const SKU_COLUMNS = [
-  { src: "Vendor SKU / Model #",            thg: "thgitemmodel"             },
-  { src: "UPC Barcode (Unit)",              thg: "thgupcbarcodeunit"        },
-  { src: "Colour Family",                   thg: "thgcolourfamily"          },
-  { src: "Colour Name",                     thg: "thgcolour"                },
-  { src: "Units per Inner",                 thg: "thgunitsperinner"         },
-  { src: "Inner Weight (kg)",               thg: "thginnerweight"           },
-  { src: "Pallet Cases/Layer",              thg: "thgpalletcasesperlayer"   },
-  { src: "Pallet Layers/Pallet",            thg: "thgpalletlayersperpallet" },
-  { src: "Pallet Height (cm)",              thg: "thgpalletheight"          },
-  { src: "Pallet Weight (kg)",              thg: "thgpalletweight"          },
-  { src: "Units per Pallet",               thg: "thgunitsperpallet"        },
-  { src: "Lead Time Dropship (days)",       thg: "thgleadtimedropship"      },
-  { src: "HST/QST Code",                    thg: "thghstqstcode"            },
-  { src: "Inner Pack Barcode",              thg: "thginnerpackbarcode"      },
-  { src: "Case Barcode (ITF-14)",           thg: "thgcasebarcodeitf14"      },
-  { src: "Size",                            thg: "thgsize"                  },
-  { src: "Additional Sizing Details",       thg: "thgsizecategory"          },
-  { src: "Diameter (cm)",                   thg: "thgdiameter"              },
-  { src: "Capacity",                        thg: "thgcapacity"              },
-  { src: "Piece Count",                     thg: "thgpiececount"            },
-  { src: "Length (cm)",                     thg: "thglength"                },
-  { src: "Capacity (Cups)",                 thg: "thgcapacitycups"          },
-  { src: "Speed Settings",                  thg: "thgspeedsettings"         },
-  { src: "Slice Count",                     thg: "thgslicecount"            },
-  { src: "Volume (Cubic Ft)",               thg: "thgappliancevolume"       },
-  { src: "Weight / Qty (g)",                thg: "thgweightqty"             },
-  { src: "Pod / Bag Qty",                   thg: "thgpodbagqty"             },
-  { src: "Bottle Qty",                      thg: "thgbottleqty"             },
-  { src: "Sharpener Stages",                thg: "thgsharpenerstages"       },
-  { src: "Knife Slot Count",                thg: "thgknifeslotcount"        },
-  { src: "Volume (oz/mL)",                  thg: "thgvolume"                },
-];
+// SKU-level identifiers that must not be written at product level. The register carries
+// these per SKU and a product record is a copy of its first SKU row, so populating them at
+// product level publishes one arbitrary variant's identifier — 735 of 2974 products have
+// SKUs that disagree on Item / Model. The template columns stay; they are just left empty.
+const PRODUCT_EXCLUDED_ATTRS = ["thgupcbarcodeunit", "thgitemmodel"];
 
-const DIMENSION_COLUMNS = [
-  { src: "Unit Dimensions (L×W×H cm)",  thg: "thgunitdimensionslwh",  level: "product" },
-  { src: "Case Dimensions (L×W×H cm)",  thg: "thgcasedimensionslwh",  level: "product" },
-  { src: "Inner Dimensions (L×W×H cm)", thg: "thginnerdimensionslwh", level: "sku"     },
-  { src: "Pallet Size (cm)",            thg: "thgpalletsize",          level: "sku"     },
-];
+function isExcludedAtProduct(col, dmdReverse) {
+  var thg = col.thg || dmdReverse.dispToThg[col.dispName];
+  return !!thg && PRODUCT_EXCLUDED_ATTRS.indexOf(thg) >= 0;
+}
+
+// The register's L4 column has been called both "L4 Product Type" (older registers) and
+// "L4 Hierarchy Node" (its DMD display name). Taxonomy path resolution and KVA detection both
+// read it by header name, so accept either — renaming it must not silently disable them.
+const L4_REGISTER_HEADERS = ["L4 Hierarchy Node", "L4 Product Type"];
+
+function l4HeaderOf(row) {
+  for (var i = 0; i < L4_REGISTER_HEADERS.length; i++) {
+    if (row[L4_REGISTER_HEADERS[i]] !== undefined) return L4_REGISTER_HEADERS[i];
+  }
+  return null;
+}
+
+function l4ValueOf(row) {
+  var h = l4HeaderOf(row);
+  return h ? String(row[h] || "").trim() : "";
+}
 
 // Matching attribute thg keys (register flow only)
 const THG_PRODUCT_ID = "thgproductid";
@@ -550,7 +524,25 @@ function buildDmdMap(wb) {
     if (mandatoryIdx < 0) { var i = hdrs0.indexOf(k); if (i >= 0) mandatoryIdx = i; }
   });
 
-  var map = {}, groupMap = {}, mandatoryMap = {};
+  // UOM columns. An ATTRIBUTES row with a UOM TYPE is a two-part field: Syndigo expects
+  // "<Display Name>" for the value and "<Display Name>.UOM" for the unit.
+  var uomTypeIdx = -1, uomAllowedIdx = -1, uomDefaultIdx = -1;
+  ["UOM TYPE", "UOMTYPE"].forEach(function(k) {
+    if (uomTypeIdx < 0) { var i = hdrs0.indexOf(k); if (i >= 0) uomTypeIdx = i; }
+  });
+  ["ALLOWED UOMS", "ALLOWED UOM"].forEach(function(k) {
+    if (uomAllowedIdx < 0) { var i = hdrs0.indexOf(k); if (i >= 0) uomAllowedIdx = i; }
+  });
+  ["DEFAULT UOM", "DEFAULT UOMS"].forEach(function(k) {
+    if (uomDefaultIdx < 0) { var i = hdrs0.indexOf(k); if (i >= 0) uomDefaultIdx = i; }
+  });
+
+  var typeIdx = -1;
+  ["DATA TYPE", "DATATYPE", "TYPE"].forEach(function(k) {
+    if (typeIdx < 0) { var i = hdrs0.indexOf(k); if (i >= 0) typeIdx = i; }
+  });
+
+  var map = {}, groupMap = {}, mandatoryMap = {}, uomMap = {}, typeMap = {};
   for (var i = dataStart; i < rows.length; i++) {
     var shortName = String(rows[i][nameIdx] || "").trim();
     var dispName  = String(rows[i][dispIdx] || "").trim();
@@ -559,9 +551,21 @@ function buildDmdMap(wb) {
       groupMap[shortName]    = groupIdx    >= 0 ? String(rows[i][groupIdx]    || "").trim() : "";
       var mVal = mandatoryIdx >= 0 ? String(rows[i][mandatoryIdx] || "").trim().toUpperCase() : "";
       mandatoryMap[shortName] = (mVal === "YES" || mVal === "TRUE" || mVal === "1" || mVal === "Y");
+
+      typeMap[shortName] = typeIdx >= 0 ? String(rows[i][typeIdx] || "").trim() : "";
+
+      var uType = uomTypeIdx >= 0 ? String(rows[i][uomTypeIdx] || "").trim() : "";
+      if (uType && uType.toLowerCase() !== "none") {
+        uomMap[shortName] = {
+          type: uType,
+          def:  uomDefaultIdx >= 0 ? String(rows[i][uomDefaultIdx] || "").trim() : "",
+          allowed: (uomAllowedIdx >= 0 ? String(rows[i][uomAllowedIdx] || "") : "")
+                     .split("||").map(function(x) { return x.trim(); }).filter(Boolean)
+        };
+      }
     }
   }
-  return { map: map, groupMap: groupMap, mandatoryMap: mandatoryMap };
+  return { map: map, groupMap: groupMap, mandatoryMap: mandatoryMap, uomMap: uomMap, typeMap: typeMap };
 }
 
 // ============================================================
@@ -587,6 +591,220 @@ function buildDmdReverseMaps(dmd) {
     }
   });
   return { dispToGroup: dispToGroup, dispToMandatory: dispToMandatory, dispToThg: dispToThg };
+}
+
+// ============================================================
+// UOM TWO-PART FIELDS
+// ============================================================
+// The unit comes from the trailing parenthetical of the source header
+// ("Unit Weight (kg)" -> kg). If that is missing or is not an allowed UOM we fall back
+// to the DEFAULT UOM in the DMD and warn, because silently guessing the unit would
+// rescale every value in the column.
+
+var UOM_SYNONYMS = {
+  kgs: "kg", kilogram: "kg", kilograms: "kg", gram: "g", grams: "g", gr: "g",
+  lbs: "lb", pound: "lb", pounds: "lb", ounce: "oz", ounces: "oz",
+  centimeter: "cm", centimeters: "cm", centimetre: "cm", centimetres: "cm",
+  millimeter: "mm", millimeters: "mm", meter: "m", meters: "m", metre: "m", metres: "m",
+  inch: "in", inches: "in", feet: "ft", foot: "ft", yard: "yd", yards: "yd",
+  liter: "l", liters: "l", litre: "l", litres: "l", ltr: "l",
+  milliliter: "ml", milliliters: "ml", millilitre: "ml", millilitres: "ml", mls: "ml",
+  "fl oz": "fl_oz", floz: "fl_oz", "fluid ounce": "fl_oz", "fluid ounces": "fl_oz",
+  pint: "pt", pints: "pt", quart: "qt", quarts: "qt", gallon: "gal", gallons: "gal",
+  "cubic inch": "cu_in", "cubic inches": "cu_in", cuin: "cu_in",
+  "cubic ft": "cu_ft", "cubic foot": "cu_ft", "cubic feet": "cu_ft", cuft: "cu_ft"
+};
+
+function canonicalUom(raw) {
+  var s = String(raw || "").trim().toLowerCase().replace(/\./g, "").replace(/\s+/g, " ");
+  if (!s) return "";
+  return UOM_SYNONYMS[s] || s.replace(/\s+/g, "_");
+}
+
+// Decide the fallback unit for one column, used for rows where the input supplies none.
+// Precedence is handled by the caller: a register ".UOM" column beats the header
+// parenthetical, which beats the DMD default.
+// `hasUomCol` suppresses the no-unit warning when the register carries the unit per row.
+// Returns { unit, warning }.
+function resolveUomValue(srcHeader, dispName, uomInfo, hasUomCol) {
+  var allowed = uomInfo.allowed || [], allowedCanon = {};
+  allowed.forEach(function(a) { allowedCanon[canonicalUom(a)] = a; });
+
+  // A UOM-typed attribute always has a bare display name in the DMD, so a trailing
+  // parenthetical on the source header is a unit hint, never part of the name.
+  var m = /\(([^)]*)\)\s*$/.exec(String(srcHeader || ""));
+  if (m) {
+    var cand = canonicalUom(m[1]);
+    if (allowedCanon[cand]) return { unit: allowedCanon[cand], warning: null };
+    if (cand) return {
+      unit: uomInfo.def || "",
+      warning: "&ldquo;" + escHtml(srcHeader) + "&rdquo; &rarr; <strong>" + escHtml(dispName) +
+        "</strong>: unit &ldquo;" + escHtml(m[1].trim()) + "&rdquo; is not an allowed UOM (" +
+        escHtml(allowed.join(", ")) + ") — falling back to the DMD default <strong>" +
+        escHtml(uomInfo.def || "(none)") + "</strong>. Confirm the source values really are in that unit."
+    };
+  }
+
+  if (hasUomCol) return { unit: uomInfo.def || "", warning: null };
+
+  if (!uomInfo.def) return {
+    unit: "",
+    warning: "<strong>" + escHtml(dispName) + "</strong> is a UOM field, but the DMD has no DEFAULT UOM, " +
+      "the source header carries no unit, and the input has no <em>" + escHtml(dispName) + ".UOM</em> " +
+      "column — the unit will be left empty."
+  };
+
+  // No unit anywhere in the input. The default may well be wrong for this data
+  // (e.g. values in g under an attribute that defaults to kg), so say so.
+  return {
+    unit: uomInfo.def,
+    warning: "<strong>" + escHtml(dispName) + "</strong> is a UOM field but the input supplies no unit — " +
+      "using the DMD default <strong>" + escHtml(uomInfo.def) + "</strong> for every row. " +
+      "If the values are not in " + escHtml(uomInfo.def) + ", add a &ldquo;" + escHtml(dispName) +
+      ".UOM&rdquo; column to the input or put the unit in the header."
+  };
+}
+
+// Render a value the way its DMD DATA TYPE says it should read: a decimal always shows a
+// decimal point ("300" -> "300.00"), an integer never does ("300.0" -> "300"). Cells are
+// written as inline strings, so this text is exactly what lands in the sheet.
+// Anything that is not a plain number is passed through untouched — the register still holds
+// values like "0.95 kg", "19.5\"" and "N/A", and mangling those would lose data.
+// Decimal places per attribute: two everywhere except the small-item weights, which carry
+// values down to 0.0850 kg. Keyed by attribute short name rather than display name so a
+// rename in the DMD cannot silently detach the setting. An attribute that should never show
+// a decimal point belongs in the DMD as an integer, not as a decimal with zero places.
+const DECIMAL_PLACES = {
+  thgunitweight:  4,
+  thgcaseweight:  4,   // conversion artefacts like 0.5760 kg
+  thginnerweight: 4
+};
+const DECIMAL_PLACES_DEFAULT = 2;
+
+// Counts, per column, of values whose stored precision exceeded the configured places and
+// were therefore rounded. Reset at the start of each entity pass.
+var DECIMAL_ROUNDED = {};
+
+function formatCellValue(raw, col) {
+  var str = String(raw).trim();
+  if (!str || !/^[+-]?\d+(\.\d+)?$/.test(str)) return str;   // "0.95 kg", "N/A", "19.5\"" etc.
+  var t = String(col && col.dataType || "").trim().toLowerCase();
+
+  if (t === "decimal") {
+    var places = (col && col.decimals != null) ? col.decimals : DECIMAL_PLACES_DEFAULT;
+    var out = Number(str).toFixed(places);
+    if (Number(out) !== Number(str)) {
+      var k = (col && col.dispName) || "?";
+      DECIMAL_ROUNDED[k] = (DECIMAL_ROUNDED[k] || 0) + 1;
+    }
+    return out;
+  }
+  if (t === "integer" || t === "int") {
+    var num = Number(str);
+    // A real fraction under an integer attribute is a data problem; keep the value rather
+    // than silently rounding it away.
+    return (num === Math.floor(num)) ? String(num) : str;
+  }
+  return str;
+}
+
+// Tag each column with its DMD DATA TYPE and decimal precision so the row builders can
+// format its values. Resets the rounding counters for this pass.
+function attachDataTypes(resolvedCols, typeMap, dmdReverse) {
+  DECIMAL_ROUNDED = {};
+  resolvedCols.forEach(function(col) {
+    if (col.isUom) return;
+    var thg = col.thg || dmdReverse.dispToThg[col.dispName];
+    col.dataType = thg && typeMap ? (typeMap[thg] || "") : "";
+    col.decimals = (thg && DECIMAL_PLACES[thg] != null) ? DECIMAL_PLACES[thg] : DECIMAL_PLACES_DEFAULT;
+  });
+}
+
+// Report any column where the configured precision actually discarded digits.
+function logDecimalRounding(label) {
+  var cols = Object.keys(DECIMAL_ROUNDED);
+  if (!cols.length) return;
+  log("warn", label + ": rounded to the configured decimal places in " +
+    cols.map(function(c) {
+      return "<strong>" + escHtml(c) + "</strong> (" + DECIMAL_ROUNDED[c] + " value(s))";
+    }).join(", ") + " — raise the precision for that attribute if those digits matter.");
+}
+
+// Give every UOM-typed column in resolvedCols its ".UOM" companion: reuse the template
+// column when one exists, otherwise append. Sets col.uomCi / col.uomValue for the row
+// builders. Runs after the E-A-R append gate, since ".UOM" is not itself an E-A-R attribute.
+function attachUomColumns(resolvedCols, templateColMap, uomMap, dmdReverse, usedDisp, nextCi, appendedCols, label, inputHeaderMap) {
+  var warnings = [], added = 0, reused = 0, fromInput = 0;
+  for (var i = 0; i < resolvedCols.length; i++) {
+    var col  = resolvedCols[i];
+    if (col.isUom) continue;
+    var disp = col.dispName;
+    var thg  = col.thg || dmdReverse.dispToThg[disp];
+    var info = thg ? uomMap[thg] : null;
+    if (!info) continue;
+
+    // Does the input carry the unit per row? Accept it keyed by either the Syndigo
+    // display name or the source header, so the input can be renamed either way.
+    var ih = inputHeaderMap || {};
+    col.uomSrc = ih[canonicalInputKey(disp + ".UOM")] ||
+                 (col.src ? ih[canonicalInputKey(col.src + ".UOM")] : null) || null;
+    if (col.uomSrc) fromInput++;
+
+    // Allowed-UOM lookup, kept on the column so each row can be validated cheaply.
+    col.uomAllowed = {};
+    (info.allowed || []).forEach(function(a) { col.uomAllowed[canonicalUom(a)] = a; });
+
+    var r = resolveUomValue(col.src, disp, info, !!col.uomSrc);
+    if (r.warning) warnings.push(label + ": " + r.warning);
+    col.uomValue = r.unit;
+    if (!col.uomValue && !col.uomSrc) continue;
+
+    var uomDisp = disp + ".UOM";
+    var ci = templateColMap[uomDisp];
+    if (ci !== undefined) {
+      reused++;
+    } else if (usedDisp[uomDisp]) {
+      continue;
+    } else {
+      ci = nextCi.v++;
+      usedDisp[uomDisp] = true;
+      appendedCols.push({
+        src: null, thg: null, dispName: uomDisp, ci: ci,
+        group: col.group || dmdReverse.dispToGroup[disp] || "",
+        mandatory: false, level: col.level || null, isUom: true
+      });
+      added++;
+    }
+    col.uomCi = ci;
+  }
+  return { warnings: warnings, added: added, reused: reused, fromInput: fromInput };
+}
+
+// Normalize an input header for lookup: case- and spacing-insensitive.
+function canonicalInputKey(h) {
+  return String(h || "").trim().toLowerCase().replace(/\s+/g, " ").replace(/\s*\/\s*/g, "/");
+}
+
+// Build the lookup used above from the raw input header row.
+function buildInputHeaderMap(inputHeaders) {
+  var m = {};
+  (inputHeaders || []).forEach(function(h) {
+    if (h) { var k = canonicalInputKey(h); if (m[k] === undefined) m[k] = h; }
+  });
+  return m;
+}
+
+// Per-row unit: prefer the input cell, validated against ALLOWED UOMS; otherwise the
+// column-level fallback. An unrecognised cell value falls back rather than shipping junk.
+function uomCellValue(row, col) {
+  if (col.uomSrc) {
+    var raw = row[col.uomSrc];
+    if (raw != null && raw !== "") {
+      var hit = col.uomAllowed ? col.uomAllowed[canonicalUom(raw)] : null;
+      if (hit) return hit;
+    }
+  }
+  return col.uomValue || "";
 }
 
 // Build entity assignment map from E-A-R MODEL sheet.
@@ -704,29 +922,15 @@ function buildTaxonomyPathMap(wb) {
 }
 
 // Auto-match input headers to template columns and DMD attributes.
-// Tries exact match first, then normalized match (strip trailing UOM paren group).
-// Returns { resolved, appended, matchedSrcs } — matchedSrcs is used to filter the
-// hardcoded rename table so the same source column is never mapped twice.
+// EXACT matching only. The normalized fallback that used to live here stripped the trailing
+// parenthetical, which let a stale template column capture an attribute that had since been
+// renamed ("Length" matching a leftover "Length (cm)" column), silently writing the data into
+// a header Syndigo does not recognise. The register now carries the DMD display names
+// directly, so a header either matches an attribute exactly or is reported as unmapped.
+// Returns { resolved, appended, matchedSrcs }.
 function autoMatchHeaders(inputHeaders, templateColMap, dmdReverse) {
-  // Normalized index for template display names
-  // A normalized key claimed by more than one display name (e.g. "Volume" from both
-  // "Volume" and "Volume (Cubic Ft)") is ambiguous: it is disqualified from the
-  // normalized tiers and left to the hardcoded rename table, which names the
-  // attribute explicitly. Otherwise insertion order would silently decide the binding.
-  var tmplNormToDisp = {}, tmplNormAmbig = {};
-  Object.keys(templateColMap).forEach(function(d) {
-    var n = normHeader(d);
-    if (tmplNormToDisp[n] === undefined) tmplNormToDisp[n] = d;
-    else if (tmplNormToDisp[n] !== d) tmplNormAmbig[n] = true;
-  });
-  // Normalized index for DMD display names
-  var dmdExact = {}, dmdNormToDisp = {}, dmdNormAmbig = {};
-  Object.keys(dmdReverse.dispToGroup).forEach(function(d) {
-    dmdExact[d] = true;
-    var n = normHeader(d);
-    if (dmdNormToDisp[n] === undefined) dmdNormToDisp[n] = d;
-    else if (dmdNormToDisp[n] !== d) dmdNormAmbig[n] = true;
-  });
+  var dmdExact = {};
+  Object.keys(dmdReverse.dispToGroup).forEach(function(d) { dmdExact[d] = true; });
 
   var resolved = [], appended = [];
   var usedDisp    = {}; // prevent mapping the same Syndigo column twice
@@ -734,7 +938,7 @@ function autoMatchHeaders(inputHeaders, templateColMap, dmdReverse) {
 
   inputHeaders.forEach(function(h) {
     if (!h || matchedSrcs[h]) return;
-    var norm = normHeader(h);
+    if (/\.UOM$/i.test(h)) return;   // unit companion — handled by attachUomColumns
 
     // 1. Exact match in template
     if (templateColMap[h] !== undefined && !usedDisp[h]) {
@@ -742,74 +946,17 @@ function autoMatchHeaders(inputHeaders, templateColMap, dmdReverse) {
       resolved.push({ src: h, thg: null, dispName: h, ci: templateColMap[h], level: null });
       return;
     }
-    // 2. Normalized match in template (e.g. "Pallet Weight (kg)" → template col "Pallet Weight")
-    var tmplDisp = tmplNormAmbig[norm] ? undefined : tmplNormToDisp[norm];
-    if (tmplDisp && templateColMap[tmplDisp] !== undefined && !usedDisp[tmplDisp]) {
-      usedDisp[tmplDisp] = matchedSrcs[h] = true;
-      resolved.push({ src: h, thg: null, dispName: tmplDisp, ci: templateColMap[tmplDisp], level: null });
-      return;
-    }
-    // 3. Exact match in DMD only (not in template → candidate for appending)
+    // 2. Exact match in DMD only (not in template → candidate for appending)
     if (dmdExact[h] && !usedDisp[h]) {
       usedDisp[h] = matchedSrcs[h] = true;
       appended.push({ src: h, thg: null, dispName: h,
         group: dmdReverse.dispToGroup[h] || "", mandatory: dmdReverse.dispToMandatory[h] || false, level: null });
       return;
     }
-    // 4. Normalized match in DMD
-    if (dmdNormAmbig[norm]) {
-      log("info", "Auto-match: &ldquo;" + escHtml(h) + "&rdquo; normalizes to &ldquo;" +
-        escHtml(norm) + "&rdquo;, which matches more than one attribute — " +
-        "left to the rename table to resolve explicitly");
-      return;
-    }
-    var dmdDisp = dmdNormToDisp[norm];
-    if (dmdDisp && !usedDisp[dmdDisp]) {
-      usedDisp[dmdDisp] = matchedSrcs[h] = true;
-      appended.push({ src: h, thg: null, dispName: dmdDisp,
-        group: dmdReverse.dispToGroup[dmdDisp] || "", mandatory: dmdReverse.dispToMandatory[dmdDisp] || false, level: null });
-    }
-    // else: no match — register header not recognized, skip silently
+    // else: not an exact display name — reported by the unmapped-column warning.
   });
 
   return { resolved: resolved, appended: appended, matchedSrcs: matchedSrcs };
-}
-
-// resolveColumns: dmdGroupMap provides section/group label; dmdMandatoryMap provides mandatory flag.
-// Fields in DMD but not in template go to `appended` (caller assigns ci and adds to output).
-function resolveColumns(columns, dmdMap, dmdGroupMap, dmdMandatoryMap, templateColMap, label, templateFile) {
-  var resolved = [], appended = [], warnings = [];
-  for (var i = 0; i < columns.length; i++) {
-    var col = columns[i];
-    var dispName = dmdMap[col.thg];
-    if (!dispName) {
-      warnings.push(
-        label + ": attribute <strong>" + escHtml(col.thg) + "</strong> not found in Thing Data Model" +
-        " — source column &ldquo;" + escHtml(col.src) + "&rdquo; will be skipped"
-      );
-      continue;
-    }
-    var ci = templateColMap[dispName];
-    if (ci === undefined) {
-      // Normalized fallback — handles case and spacing differences (e.g. "oz / mL" vs "oz/mL")
-      var norm = normalizeHeader(dispName);
-      for (var k in templateColMap) {
-        if (normalizeHeader(k) === norm) { ci = templateColMap[k]; break; }
-      }
-    }
-    if (ci === undefined) {
-      // Valid DMD field — will be appended to the output file as a new column
-      appended.push({
-        src: col.src, thg: col.thg, dispName: dispName,
-        group:     (dmdGroupMap     && dmdGroupMap[col.thg])     || "",
-        mandatory: (dmdMandatoryMap && dmdMandatoryMap[col.thg]) || false,
-        level: col.level || null
-      });
-      continue;
-    }
-    resolved.push({ src: col.src, thg: col.thg, dispName: dispName, ci: ci, level: col.level || null });
-  }
-  return { resolved: resolved, appended: appended, warnings: warnings };
 }
 
 function normalizeHeader(s) {
@@ -1080,7 +1227,13 @@ function buildProductRow(product, resolvedCols, prodIdCi, prodTypeCi, prodNameCi
   for (var i = 0; i < resolvedCols.length; i++) {
     var col = resolvedCols[i];
     var v   = product[col.src];
-    if (v != null && v !== "") cells[col.ci] = String(v);
+    if (v != null && v !== "") {
+      cells[col.ci] = formatCellValue(v, col);
+      if (col.uomCi !== undefined) {
+        var uv = uomCellValue(product, col);
+        if (uv) cells[col.uomCi] = uv;
+      }
+    }
   }
   return cells;
 }
@@ -1095,7 +1248,13 @@ function buildSKURow(sku, resolvedCols, skuIdCi, skuProdIdCi, skuTypeCi, skuName
   for (var i = 0; i < resolvedCols.length; i++) {
     var col = resolvedCols[i];
     var v   = sku[col.src];
-    if (v != null && v !== "") cells[col.ci] = String(v);
+    if (v != null && v !== "") {
+      cells[col.ci] = formatCellValue(v, col);
+      if (col.uomCi !== undefined) {
+        var uv = uomCellValue(sku, col);
+        if (uv) cells[col.uomCi] = uv;
+      }
+    }
   }
   return cells;
 }
@@ -1994,13 +2153,55 @@ var state = {
   skuRows: null, skuRelRows: null, skuTemplateBuf: null
 };
 
+// type: "warn"/"err" need a decision, "ok" is the headline result, "info" is commentary.
+var LOG_ENTRIES = [];
+
 function log(type, msg) {
-  var li = document.createElement("li");
-  li.className = type;
-  li.innerHTML = "<span>" + msg + "</span>";
-  document.getElementById("log-list").appendChild(li);
+  LOG_ENTRIES.push({ type: type, msg: msg });
+  renderLog();
 }
-function clearLog() { document.getElementById("log-list").innerHTML = ""; }
+
+function clearLog() { LOG_ENTRIES = []; renderLog(); }
+
+function renderLog() {
+  var box = document.getElementById("log-groups");
+  if (!box) return;
+  var warns   = [], results = [], details = [];
+  LOG_ENTRIES.forEach(function(e) {
+    if (e.type === "warn" || e.type === "err") warns.push(e);
+    else if (e.type === "ok")                  results.push(e);
+    else                                       details.push(e);
+  });
+
+  function list(items) {
+    return '<ul class="log-list">' + items.map(function(e) {
+      return '<li class="' + e.type + '"><span>' + e.msg + "</span></li>";
+    }).join("") + "</ul>";
+  }
+
+  var html = "";
+  if (warns.length) {
+    html += '<section class="log-group"><div class="log-group-title warn">' +
+      "Needs attention &middot; " + warns.length + "</div>" + list(warns) + "</section>";
+  }
+  if (results.length) {
+    html += '<section class="log-group"><div class="log-group-title">Result</div>' +
+      list(results) + "</section>";
+  }
+  if (details.length) {
+    html += '<details class="log-group"><summary class="log-group-title">Details &middot; ' +
+      details.length + "</summary>" + list(details) + "</details>";
+  }
+  box.innerHTML = html;
+
+  var sum = document.getElementById("log-summary");
+  if (sum) {
+    sum.className = "log-summary" + (warns.length ? " has-warn" : "");
+    sum.innerHTML = !LOG_ENTRIES.length ? ""
+      : warns.length ? "&#9888; " + warns.length + (warns.length === 1 ? " warning" : " warnings")
+      : "&#10003; no warnings";
+  }
+}
 function escHtml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -2031,8 +2232,8 @@ function showTemplateCached(key, label, statusId, dropId) {
     var wb = XLSX.read(buf, { type: "array" });
     var n, badge;
     if (key === DMD_KEY) {
-      var dmdMap = buildDmdMap(wb);
-      n = Object.keys(dmdMap).length;
+      var dmd = buildDmdMap(wb);
+      n = Object.keys(dmd.map).length;
       if (!n) throw new Error("0 attributes");
       badge = n + " attributes cached";
     } else if (key === TAX_KEY) {
@@ -2176,18 +2377,20 @@ async function handleInputFile(file) {
   if (!products.length) { log("err", "No products found."); return; }
 
   // Build DMD map
-  var dmdWb, dmdMap, dmdGroupMap, dmdMandatoryMap, earMap;
+  var dmdWb, dmdMap, dmdGroupMap, dmdMandatoryMap, dmdUomMap, dmdTypeMap, earMap;
   try {
     dmdWb  = XLSX.read(dmdBuf, { type: "array" });
     var dmd = buildDmdMap(dmdWb);
     dmdMap = dmd.map; dmdGroupMap = dmd.groupMap; dmdMandatoryMap = dmd.mandatoryMap;
+    dmdUomMap = dmd.uomMap || {};
+    dmdTypeMap = dmd.typeMap || {};
     earMap = buildEarMap(dmdWb);
     var earProdCount = Object.keys(earMap.product).length;
     var earSkuCount  = Object.keys(earMap.sku).length;
-    log("info", "DMD loaded: <strong>" + Object.keys(dmdMap).length + "</strong> attributes" +
-      (earProdCount || earSkuCount
-        ? " (E-A-R: <strong>" + earProdCount + "</strong> product, <strong>" + earSkuCount + "</strong> sku)"
-        : " — E-A-R MODEL empty, append filtering skipped"));
+    log(earProdCount || earSkuCount ? "info" : "warn",
+      earProdCount || earSkuCount
+        ? "E-A-R bindings: <strong>" + earProdCount + "</strong> product, <strong>" + earSkuCount + "</strong> sku attributes"
+        : "E-A-R MODEL is empty — entity filtering for appended columns is disabled");
   } catch(e) { log("err", "DMD error: " + escHtml(e.message)); return; }
 
   var dmdReverse = buildDmdReverseMaps({ map: dmdMap, groupMap: dmdGroupMap, mandatoryMap: dmdMandatoryMap });
@@ -2201,20 +2404,20 @@ async function handleInputFile(file) {
       var taxPathMap = taxResult.pathMap;
       var taxCount = Object.keys(taxPathMap).length;
       if (taxCount) {
-        log("info", "Taxonomy model: <strong>" + taxCount + "</strong> productTaxonomy categories");
         products.forEach(function(p) {
-          var raw = p["L4 Product Type"];
+          var h = l4HeaderOf(p);
+          var raw = h ? p[h] : "";
           if (raw) {
             p._l4TypeRaw = raw;
-            var path = taxPathMap[raw.toLowerCase()];
-            if (path) p["L4 Product Type"] = path;
+            var path = taxPathMap[String(raw).toLowerCase()];
+            if (path) p[h] = path;
           }
         });
         // Collect distinct resolved L4 paths for Reference Data dropdown update
         var l4PathSeen = {};
         state.l4Paths = [];
         products.forEach(function(p) {
-          var v = p["L4 Product Type"];
+          var v = l4ValueOf(p);
           if (v && !l4PathSeen[v]) { l4PathSeen[v] = true; state.l4Paths.push(v); }
         });
         if (!state.l4Paths.length) state.l4Paths = null;
@@ -2230,17 +2433,20 @@ async function handleInputFile(file) {
   try {
     var prodWb  = XLSX.read(prodBuf, { type: "array" });
     var prodMap = buildColMap(prodWb, "Entities");
-    log("info", "Product template: <strong>" + Object.keys(prodMap).length + "</strong> columns");
 
-    // Auto-match register headers to template/DMD, then apply rename table for remainder
+    // Register headers map to attributes by exact DMD display name.
     var autoProd         = autoMatchHeaders(inputHeaders, prodMap, dmdReverse);
-    var filteredProdCols = PRODUCT_COLUMNS.filter(function(c) { return !autoProd.matchedSrcs[c.src]; });
-    var rProd = resolveColumns(filteredProdCols, dmdMap, dmdGroupMap, dmdMandatoryMap, prodMap, "Product", "product.xlsm");
-    var rDimP = resolveColumns(
-      DIMENSION_COLUMNS.filter(function(c) { return c.level === "product"; }),
-      dmdMap, dmdGroupMap, dmdMandatoryMap, prodMap, "Product dim", "product.xlsm");
-    var resolvedProdCols = autoProd.resolved.concat(rProd.resolved).concat(rDimP.resolved);
-    rProd.warnings.concat(rDimP.warnings).forEach(function(w) { log("warn", w); });
+    var excludedAtProduct = [];
+    var resolvedProdCols = autoProd.resolved.filter(function(c) {
+      if (!isExcludedAtProduct(c, dmdReverse)) return true;
+      excludedAtProduct.push(c.dispName);
+      return false;
+    });
+    if (excludedAtProduct.length) {
+      log("info", "Product: " + excludedAtProduct.map(function(d) {
+        return "<strong>" + escHtml(d) + "</strong>";
+      }).join(", ") + " left empty — SKU-level identifier, not a product attribute");
+    }
 
     // Append columns valid in DMD + register but absent from product.xlsm
     var appendedProdCols = [];
@@ -2249,8 +2455,9 @@ async function handleInputFile(file) {
     var prodUsedDisp = {};
     resolvedProdCols.forEach(function(c) { prodUsedDisp[c.dispName] = true; });
     var earHasProduct = Object.keys(earMap.product).length > 0;
-    autoProd.appended.concat(rProd.appended).concat(rDimP.appended).forEach(function(col) {
+    autoProd.appended.forEach(function(col) {
       if (prodUsedDisp[col.dispName]) return;
+      if (isExcludedAtProduct(col, dmdReverse)) return;
       if (earHasProduct) {
         var thgKey = col.thg || dmdReverse.dispToThg[col.dispName];
         if (!thgKey || !earMap.product[thgKey]) return;
@@ -2263,6 +2470,16 @@ async function handleInputFile(file) {
         (col.group ? " (" + escHtml(col.group) + ")" : "") +
         " — found in DMD and the input file but missing from product.xlsm; column added to output");
     });
+    attachDataTypes(resolvedProdCols, dmdTypeMap, dmdReverse);
+    var productUomCtr = { v: nextProdCi };
+    var productUom = attachUomColumns(resolvedProdCols, prodMap, dmdUomMap, dmdReverse, prodUsedDisp, productUomCtr, appendedProdCols, "Product", buildInputHeaderMap(inputHeaders));
+    nextProdCi = productUomCtr.v;
+    productUom.warnings.forEach(function(w) { log("warn", w); });
+    if (productUom.reused || productUom.added) {
+      log("info", "Product: UOM two-part fields — <strong>" + (productUom.reused + productUom.added) +
+        "</strong> unit column(s) populated (" + productUom.reused + " already in the template, " +
+        productUom.added + " added; " + productUom.fromInput + " taking the unit from the input file)");
+    }
     state.appendedProdCols = appendedProdCols;
 
     var prodIdCi       = resolveOne(THG_PRODUCT_ID, dmdMap, prodMap);
@@ -2277,6 +2494,7 @@ async function handleInputFile(file) {
       (appendedProdCols.length ? " (<strong>" + appendedProdCols.length + "</strong> appended)" : ""));
 
     state.productRows     = products.map(function(p) { return buildProductRow(p, resolvedProdCols, prodIdCi, prodTypeCi, prodNameCi); });
+    logDecimalRounding("Product");
     state.prodTemplateBuf = prodBuf;
 
     // Build UUID map from Syndigo export (optional — needed for KVA supplement)
@@ -2321,7 +2539,7 @@ async function handleInputFile(file) {
         var unmatchedL4 = [];
         products.forEach(function(p, idx) {
           var productRow = state.productRows[idx];
-          var l4Type = (p._l4TypeRaw || p["L4 Product Type"] || "").toLowerCase();
+          var l4Type = String(p._l4TypeRaw || l4ValueOf(p) || "").toLowerCase();
           var kvas   = kvaMap[l4Type] || [];
           if (!kvas.length && l4Type) unmatchedL4.push(l4Type);
           // First KVA goes on the product row itself (placeholder for single-KVA products)
@@ -2356,6 +2574,7 @@ async function handleInputFile(file) {
             "Options written: " + escHtml(uniqUnmatched.slice(0, 5).join(", ")) +
             (uniqUnmatched.length > 5 ? ", and " + (uniqUnmatched.length - 5) + " more" : ""));
         }
+
         if (kvaAdded) {
           var suppCount = state.kvaRows.length;
           var uuidCoverage = suppCount ? state.kvaRows.filter(function(r) { return prodEntityIdCi !== undefined && r[prodEntityIdCi]; }).length : 0;
@@ -2383,17 +2602,10 @@ async function handleInputFile(file) {
     var skuWb  = XLSX.read(skuBuf,  { type: "array" });
     var skuMap = buildColMap(skuWb,  "Entities");
     var relMap = buildColMap(skuWb,  "Relationships");
-    log("info", "SKU template: <strong>" + Object.keys(skuMap).length + "</strong> columns");
 
-    // Auto-match register headers to template/DMD, then apply rename table for remainder
+    // Register headers map to attributes by exact DMD display name.
     var autoSku         = autoMatchHeaders(inputHeaders, skuMap, dmdReverse);
-    var filteredSkuCols = SKU_COLUMNS.filter(function(c) { return !autoSku.matchedSrcs[c.src]; });
-    var rSku  = resolveColumns(filteredSkuCols, dmdMap, dmdGroupMap, dmdMandatoryMap, skuMap, "SKU", "SKU.xlsm");
-    var rDimS = resolveColumns(
-      DIMENSION_COLUMNS.filter(function(c) { return c.level === "sku"; }),
-      dmdMap, dmdGroupMap, dmdMandatoryMap, skuMap, "SKU dim", "SKU.xlsm");
-    var resolvedSkuCols = autoSku.resolved.concat(rSku.resolved).concat(rDimS.resolved);
-    rSku.warnings.concat(rDimS.warnings).forEach(function(w) { log("warn", w); });
+    var resolvedSkuCols = autoSku.resolved.slice();
 
     // Append columns valid in DMD + register but absent from SKU.xlsm
     var appendedSkuCols = [];
@@ -2402,7 +2614,7 @@ async function handleInputFile(file) {
     var skuUsedDisp = {};
     resolvedSkuCols.forEach(function(c) { skuUsedDisp[c.dispName] = true; });
     var earHasSku = Object.keys(earMap.sku).length > 0;
-    autoSku.appended.concat(rSku.appended).concat(rDimS.appended).forEach(function(col) {
+    autoSku.appended.forEach(function(col) {
       if (skuUsedDisp[col.dispName]) return;
       if (earHasSku) {
         var thgKey = col.thg || dmdReverse.dispToThg[col.dispName];
@@ -2416,6 +2628,16 @@ async function handleInputFile(file) {
         (col.group ? " (" + escHtml(col.group) + ")" : "") +
         " — found in DMD and the input file but missing from SKU.xlsm; column added to output");
     });
+    attachDataTypes(resolvedSkuCols, dmdTypeMap, dmdReverse);
+    var skuUomCtr = { v: nextSkuCi };
+    var skuUom = attachUomColumns(resolvedSkuCols, skuMap, dmdUomMap, dmdReverse, skuUsedDisp, skuUomCtr, appendedSkuCols, "SKU", buildInputHeaderMap(inputHeaders));
+    nextSkuCi = skuUomCtr.v;
+    skuUom.warnings.forEach(function(w) { log("warn", w); });
+    if (skuUom.reused || skuUom.added) {
+      log("info", "SKU: UOM two-part fields — <strong>" + (skuUom.reused + skuUom.added) +
+        "</strong> unit column(s) populated (" + skuUom.reused + " already in the template, " +
+        skuUom.added + " added; " + skuUom.fromInput + " taking the unit from the input file)");
+    }
     state.appendedSkuCols = appendedSkuCols;
 
     var skuIdCi     = resolveOne(THG_SKU_ID,     dmdMap, skuMap);
@@ -2430,6 +2652,24 @@ async function handleInputFile(file) {
 
     var skuSeqCi = skuMap["ID"];
     state.skuRows = allSkus.map(function(s, idx) { return buildSKURow(s, resolvedSkuCols, skuIdCi, skuProdIdCi, skuTypeCi, skuNameCi, skuSeqCi, idx + 1); });
+    logDecimalRounding("SKU");
+    // Every input column should land somewhere. Anything left over is either a new register
+    // column nobody has mapped yet or a header that has been renamed out from under the tool
+    // — both silently dropped data before this warning existed.
+    var mappedSrcs = {};
+    [autoProd, autoSku].forEach(function(a) {
+      if (a) Object.keys(a.matchedSrcs).forEach(function(src) { mappedSrcs[src] = true; });
+    });
+    var unmappedSrcs = inputHeaders.filter(function(h) {
+      return h && !mappedSrcs[h] && REGISTER_IGNORE.indexOf(h) < 0 && !/\.UOM$/i.test(h);
+    });
+    if (unmappedSrcs.length) {
+      log("warn", "<strong>" + unmappedSrcs.length + "</strong> input column(s) map to nothing in the " +
+        "Thing Data Model and will be dropped: " +
+        unmappedSrcs.map(function(h) { return "&ldquo;" + escHtml(h) + "&rdquo;"; }).join(", ") +
+        ". Rename the column to its DMD display name, or add the attribute to the DMD.");
+    }
+
     state.skuTemplateBuf = skuBuf;
 
     state.skuRelRows = allSkus.map(function(s, idx) {
