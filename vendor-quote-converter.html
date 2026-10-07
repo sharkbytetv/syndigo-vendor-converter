@@ -397,7 +397,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 const RELATIONSHIP_TYPE = "sku@@Product";
 // Bump on every change that gets pushed. Shown next to the page title so you can confirm
 // at a glance which build the browser is actually running.
-const APP_VERSION = "2.5.0";
+const APP_VERSION = "2.5.1";
 const APP_BUILT   = "2026-10-06";
 
 const PROD_TMPL_KEY = "syndigo_prod_tmpl_v2";
@@ -530,8 +530,9 @@ function buildDmdMap(wb) {
     if (typeIdx < 0) { var i = hdrs0.indexOf(k); if (i >= 0) typeIdx = i; }
   });
   var precIdx = hdrs0.indexOf("PRECISION"), maxPrecIdx = hdrs0.indexOf("MAXIMUM PRECISION");
+  var multiIdx = hdrs0.indexOf("IS MULTI-VALUED?");
 
-  var map = {}, groupMap = {}, mandatoryMap = {}, uomMap = {}, typeMap = {}, precisionMap = {};
+  var map = {}, groupMap = {}, mandatoryMap = {}, uomMap = {}, typeMap = {}, precisionMap = {}, formatPrecisionMap = {}, multiMap = {};
   for (var i = dataStart; i < rows.length; i++) {
     var shortName = String(rows[i][nameIdx] || "").trim();
     var dispName  = String(rows[i][dispIdx] || "").trim();
@@ -542,6 +543,8 @@ function buildDmdMap(wb) {
       mandatoryMap[shortName] = (mVal === "YES" || mVal === "TRUE" || mVal === "1" || mVal === "Y");
 
       typeMap[shortName] = typeIdx >= 0 ? String(rows[i][typeIdx] || "").trim() : "";
+      var muVal = multiIdx >= 0 ? String(rows[i][multiIdx] || "").trim().toUpperCase() : "";
+      multiMap[shortName] = (muVal === "YES" || muVal === "TRUE");
 
       // Decimal places come from the model: PRECISION, else MAXIMUM PRECISION.
       var pv = precIdx    >= 0 ? String(rows[i][precIdx]    || "").trim() : "";
@@ -549,6 +552,8 @@ function buildDmdMap(wb) {
       var places = pv !== "" && !isNaN(Number(pv)) ? Number(pv)
                  : mv !== "" && !isNaN(Number(mv)) ? Number(mv) : null;
       if (places !== null) precisionMap[shortName] = Math.round(places);
+      // Syndigo's own column number format follows PRECISION only
+      if (pv !== "" && !isNaN(Number(pv))) formatPrecisionMap[shortName] = Math.round(Number(pv));
 
       var uType = uomTypeIdx >= 0 ? String(rows[i][uomTypeIdx] || "").trim() : "";
       if (uType && uType.toLowerCase() !== "none") {
@@ -561,7 +566,7 @@ function buildDmdMap(wb) {
       }
     }
   }
-  return { map: map, groupMap: groupMap, mandatoryMap: mandatoryMap, uomMap: uomMap, typeMap: typeMap, precisionMap: precisionMap };
+  return { map: map, groupMap: groupMap, mandatoryMap: mandatoryMap, uomMap: uomMap, typeMap: typeMap, precisionMap: precisionMap, formatPrecisionMap: formatPrecisionMap, multiMap: multiMap };
 }
 
 // ============================================================
@@ -806,23 +811,25 @@ function uomCellValue(row, col) {
 }
 
 // Build entity assignment map from E-A-R MODEL sheet.
-// Returns { product: {[thgKey]: true}, sku: {[thgKey]: true} }
+// Returns { product: {[thgKey]: true}, sku: {[thgKey]: true}, mandatory: { product, sku } } —
+// an attribute can be mandatory on one entity only, which the E-A-R records, not ATTRIBUTES.
 function buildEarMap(wb) {
   var ws = wb.Sheets["E-A-R MODEL"];
   if (!ws) return { product: {}, sku: {} };
 
   var range = XLSX.utils.decode_range(ws["!ref"] || "A1");
-  var entityMap = { product: {}, sku: {} };
+  var entityMap = { product: {}, sku: {}, mandatory: { product: {}, sku: {} } };
 
-  var entityCi = -1, attrCi = -1;
+  var entityCi = -1, attrCi = -1, mandCi = -1;
   for (var c = range.s.c; c <= range.e.c; c++) {
     var hCell = ws[XLSX.utils.encode_cell({ r: 0, c: c })];
     if (!hCell) continue;
     var h = String(hCell.v || "").trim().toUpperCase();
     if (h === "ENTITY")           entityCi = c;
     if (h === "MAPPED ATTRIBUTE") attrCi   = c;
+    if (h === "IS MANDATORY?")    mandCi   = c;
   }
-  if (entityCi < 0 || attrCi < 0) return { product: {}, sku: {} };
+  if (entityCi < 0 || attrCi < 0) return entityMap;
 
   for (var r = 1; r <= range.e.r; r++) {
     var entityCell = ws[XLSX.utils.encode_cell({ r: r, c: entityCi })];
@@ -833,6 +840,9 @@ function buildEarMap(wb) {
     if (!attr) continue;
     if (entity === "product") entityMap.product[attr] = true;
     else if (entity === "sku") entityMap.sku[attr] = true;
+    var mandCell = mandCi >= 0 ? ws[XLSX.utils.encode_cell({ r: r, c: mandCi })] : null;
+    var mv = mandCell ? String(mandCell.v || "").trim().toUpperCase() : "";
+    if ((mv === "YES" || mv === "TRUE") && entityMap.mandatory[entity]) entityMap.mandatory[entity][attr] = true;
   }
   return entityMap;
 }
@@ -853,7 +863,7 @@ function buildTaxonomyCsa(wb) {
   // rsInternalTaxonomyModel… are Syndigo's own taxonomy bookkeeping, never register data.
   Object.keys(attrs.map).forEach(function(n) {
     if (!/^rsInternal/i.test(n)) return;
-    ["map", "groupMap", "mandatoryMap", "uomMap", "typeMap", "precisionMap"].forEach(function(k) {
+    ["map", "groupMap", "mandatoryMap", "uomMap", "typeMap", "precisionMap", "formatPrecisionMap", "multiMap"].forEach(function(k) {
       delete attrs[k][n];
     });
   });
@@ -1631,7 +1641,8 @@ function replaceDataRowsXml(wsXml, rows, appendedCols) {
       var ref2 = XLSX.utils.encode_cell({ r: 1, c: ac.ci });
       if (ac.group && !ac.groupMatched && !row1GroupSeen[ac.group]) {
         row1GroupSeen[ac.group] = true;
-        row1Cells += '<c r="' + ref1 + '" t="inlineStr"><is><t>' + escXml(ac.group) + "</t></is></c>";
+        var gAttr = ac.groupStyle ? ' s="' + ac.groupStyle + '"' : '';
+        row1Cells += '<c r="' + ref1 + '"' + gAttr + ' t="inlineStr"><is><t>' + escXml(ac.group) + "</t></is></c>";
       }
       var sAttr = ac.style ? ' s="' + ac.style + '"' : '';
       row2Cells += '<c r="' + ref2 + '"' + sAttr + ' t="inlineStr"><is><t>' + escXml(ac.dispName) + "</t></is></c>";
@@ -1991,6 +2002,251 @@ async function dropTemplateGroups(templateBuf, groups) {
   return { buf: buf, columns: columns };
 }
 
+// ============================================================
+// APPENDED COLUMN FORMATTING
+// ============================================================
+// Syndigo colours each row-2 header by what the attribute is (legend on the template's Help
+// sheet), and appended columns must be indistinguishable from exported ones:
+//              plain     mandatory (red font)   collection   mandatory collection (red font)
+//   Thing      504389    8376BC                 B3B3B3       B3B3B3
+//   taxonomy   E06536    E06536                 E06536       E06536
+// The legend has no taxonomy row, so taxonomy attributes always take the orange the exports
+// use, with the red font when mandatory. Mandatory is IS MANDATORY? on the attribute or on
+// its E-A-R row for that entity. A UOM column takes its value column's colour.
+var HEADER_LOOK = {
+  thing: { plain: "504389", mandatory: "8376BC", collection: "B3B3B3" },
+  csa:   { plain: "E06536", mandatory: "E06536", collection: "E06536" },
+  font: "FFFFFF", fontMandatory: "FF0000"
+};
+
+function headerLookOf(col) {
+  var row  = col.isCsa ? HEADER_LOOK.csa : HEADER_LOOK.thing;
+  var fill = col.isCollection ? row.collection : col.mandatory ? row.mandatory : row.plain;
+  return { fill: fill, font: col.mandatory ? HEADER_LOOK.fontMandatory : HEADER_LOOK.font };
+}
+
+// Columns with the same data type and precision share a number format, so an appended
+// column copies the <col> number format of a template column of the same kind. Syndigo
+// formats a UOM column like its value column, and a decimal with no precision like an integer.
+function formatKeyOf(disp, dmdReverse, maps) {
+  var thg = dmdReverse.dispToThg[disp.replace(/\.UOM$/, "")];
+  if (!thg) return null;
+  var t = String(maps.type[thg] || "").toLowerCase();
+  if (t !== "decimal") return t;
+  return maps.precision[thg] != null ? t + "|" + maps.precision[thg] : "integer";
+}
+
+function tagAppendedCols(appendedCols, templateColMap, dmdReverse, maps) {
+  var likeByKey = {};
+  Object.keys(templateColMap).forEach(function(disp) {
+    var k = formatKeyOf(disp, dmdReverse, maps);
+    if (k && likeByKey[k] === undefined) likeByKey[k] = templateColMap[disp];
+  });
+  appendedCols.forEach(function(col) {
+    var base = col.isUom ? col.dispName.replace(/\.UOM$/, "") : col.dispName;
+    var thg  = col.thg || dmdReverse.dispToThg[base];
+    col.isCsa        = !!(thg && maps.csa[thg]);
+    col.isCollection = !!(thg && maps.multi[thg]);
+    col.mandatory  = !col.isUom && !!(thg && (maps.mandatory[thg] || (maps.earMandatory || {})[thg]));
+    col.formatKey = formatKeyOf(col.dispName, dmdReverse, maps);
+    col.likeCi = col.formatKey ? likeByKey[col.formatKey] : undefined;
+  });
+}
+
+// A whole group missing from the template means the template is older than the model — the
+// added columns are formatted correctly, but anything else stale in it is worth refreshing.
+function warnMissingGroups(appendedCols, templateWb, label) {
+  var ws = templateWb && templateWb.Sheets["Entities"];
+  if (!ws || !appendedCols.length) return;
+  var bounds = buildGroupBounds(ws), missing = {}, count = 0;
+  appendedCols.forEach(function(c) {
+    var g = String(c.group || "").trim();
+    if (g && !bounds[g.toLowerCase()]) { missing[g] = true; count++; }
+  });
+  var names = Object.keys(missing);
+  if (!names.length) return;
+  log("warn", label + ": the template has no " + names.map(function(g) { return "&ldquo;" + escHtml(g) + "&rdquo;"; }).join(", ") +
+    " group, so <strong>" + count + "</strong> column(s) were added for it, formatted to Syndigo's legend from the models. " +
+    "The template is probably older than the model — export a current one from Syndigo.");
+}
+
+// Header styles the template already uses, keyed by fill|font colour. A look the template
+// lacks (an older template has no orange header at all) is created by cloning the template's
+// own Thing header style with the fill or font swapped, so font, size and borders still match.
+async function loadHeaderStyleBook(zip, sheetXml) {
+  var file = zip.file("xl/styles.xml");
+  if (!file) return null;
+  var stylesXml = await file.async("string");
+  function section(tag) {
+    var m = stylesXml.match(new RegExp("<" + tag + "\\b[^>]*>([\\s\\S]*?)</" + tag + ">"));
+    return m ? m[1] : null;
+  }
+  var fillsS = section("fills"), fontsS = section("fonts"), xfsS = section("cellXfs");
+  if (fillsS === null || fontsS === null || xfsS === null) return null;
+  var fills = fillsS.match(/<fill\b[^>]*?(?:\/>|>[\s\S]*?<\/fill>)/g) || [];
+  var fonts = fontsS.match(/<font\b[^>]*?(?:\/>|>[\s\S]*?<\/font>)/g) || [];
+  var xfs   = xfsS.match(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g) || [];
+  var numFmtsS = section("numFmts");
+  var numFmts  = numFmtsS ? (numFmtsS.match(/<numFmt\b[^>]*\/>/g) || []) : [];
+  var changed = false, numFmtsChanged = false;
+
+  function num(tag, name) { var m = tag.match(new RegExp("\\b" + name + '="(\\d+)"')); return m ? parseInt(m[1], 10) : 0; }
+  function rgbOf(x, tag) {
+    var m = x && x.match(new RegExp("<" + tag + '\\b[^>]*\\brgb="[0-9A-Fa-f]{2}([0-9A-Fa-f]{6})"'));
+    return m ? m[1].toUpperCase() : "";
+  }
+  function lookOfXf(i) {
+    var xf = xfs[i];
+    return xf ? rgbOf(fills[num(xf, "fillId")], "fgColor") + "|" + rgbOf(fonts[num(xf, "fontId")], "color") : null;
+  }
+
+  var byLook = {}, row1Counts = {};
+  (sheetXml.match(/<c\b[^>]*>/g) || []).forEach(function(tag) {
+    var r = tag.match(/\br="[A-Z]+(\d+)"/), st = tag.match(/\bs="(\d+)"/);
+    if (!r || !st) return;
+    if (r[1] === "2") {
+      var k = lookOfXf(+st[1]);
+      if (k && byLook[k] === undefined) byLook[k] = +st[1];
+    } else if (r[1] === "1" && /\bt="/.test(tag)) {
+      row1Counts[st[1]] = (row1Counts[st[1]] || 0) + 1;
+    }
+  });
+  var groupHeaderStyle = Object.keys(row1Counts).sort(function(a, b) { return row1Counts[b] - row1Counts[a]; })[0] || null;
+  var baseColStyle = ((sheetXml.match(/<col\b[^>]*\bstyle="(\d+)"/) || [])[1]);
+
+  function numFmtIdFor(code) {
+    var found = null, maxId = 163;
+    numFmts.forEach(function(f) {
+      var id = num(f, "numFmtId");
+      if ((f.match(/formatCode="([^"]*)"/) || [])[1] === code) found = id;
+      if (id > maxId) maxId = id;
+    });
+    if (found !== null) return found;
+    numFmts.push('<numFmt numFmtId="' + (maxId + 1) + '" formatCode="' + code + '"/>');
+    changed = numFmtsChanged = true;
+    return maxId + 1;
+  }
+
+  // Column style Syndigo would give a column of this kind, when the template has no
+  // look-alike column to copy. Measured on the exports: integer (and decimal without a
+  // PRECISION) is "0", decimal is "###0." plus PRECISION zeros, everything else is text.
+  function colStyleFor(key) {
+    if (baseColStyle === undefined || !key) return null;
+    var dm = /^decimal\|(\d+)$/.exec(key);
+    var id = key === "integer" ? 1
+           : dm ? (+dm[1] ? numFmtIdFor("###0." + new Array(+dm[1] + 1).join("0")) : 1) : 49;
+    var nx = xfs[+baseColStyle];
+    nx = /\bnumFmtId="/.test(nx) ? nx.replace(/\bnumFmtId="\d+"/, 'numFmtId="' + id + '"') : nx.replace(/^<xf\b/, '<xf numFmtId="' + id + '"');
+    nx = /applyNumberFormat=/.test(nx) ? nx.replace(/applyNumberFormat="[^"]*"/, 'applyNumberFormat="1"') : nx.replace(/^<xf\b/, '<xf applyNumberFormat="1"');
+    var idx = xfs.indexOf(nx);
+    if (idx < 0) { xfs.push(nx); idx = xfs.length - 1; changed = true; }
+    return String(idx);
+  }
+
+  function styleFor(look) {
+    var key = look.fill + "|" + look.font;
+    if (byLook[key] !== undefined) return String(byLook[key]);
+    var base = byLook[HEADER_LOOK.thing.plain + "|" + HEADER_LOOK.font];
+    if (base === undefined) base = byLook[Object.keys(byLook)[0]];
+    if (base === undefined) return null;
+    var xf = xfs[base];
+
+    var fillId = -1;
+    fills.forEach(function(f, i) {
+      if (fillId < 0 && /patternType="solid"/.test(f) && rgbOf(f, "fgColor") === look.fill) fillId = i;
+    });
+    if (fillId < 0) {
+      fills.push('<fill><patternFill patternType="solid"><fgColor rgb="FF' + look.fill + '"/><bgColor indexed="64"/></patternFill></fill>');
+      fillId = fills.length - 1;
+    }
+    var baseFont = fonts[num(xf, "fontId")] || "<font/>";
+    var color = '<color rgb="FF' + look.font + '"/>';
+    var fontXml = /<color\b[^>]*\/>/.test(baseFont) ? baseFont.replace(/<color\b[^>]*\/>/, color)
+                : /<name\b/.test(baseFont)          ? baseFont.replace(/<name\b/, color + "<name")
+                : "<font>" + color + "</font>";
+    var fontId = fonts.indexOf(fontXml);
+    if (fontId < 0) { fonts.push(fontXml); fontId = fonts.length - 1; }
+
+    var nx = xf.replace(/\bfillId="\d+"/, 'fillId="' + fillId + '"').replace(/\bfontId="\d+"/, 'fontId="' + fontId + '"');
+    nx = /applyFill=/.test(nx) ? nx.replace(/applyFill="[^"]*"/, 'applyFill="1"') : nx.replace(/^<xf\b/, '<xf applyFill="1"');
+    nx = /applyFont=/.test(nx) ? nx.replace(/applyFont="[^"]*"/, 'applyFont="1"') : nx.replace(/^<xf\b/, '<xf applyFont="1"');
+    xfs.push(nx);
+    changed = true;
+    byLook[key] = xfs.length - 1;
+    return String(xfs.length - 1);
+  }
+
+  function save() {
+    if (!changed) return;
+    function put(xml, tag, items) {
+      xml = xml.replace(new RegExp("(<" + tag + "\\b[^>]*>)[\\s\\S]*?(</" + tag + ">)"), function(m, a, b) { return a + items.join("") + b; });
+      return xml.replace(new RegExp("(<" + tag + "\\b[^>]*?)\\bcount=\"\\d+\""), function(m, a) { return a + 'count="' + items.length + '"'; });
+    }
+    var out = put(put(put(stylesXml, "fills", fills), "fonts", fonts), "cellXfs", xfs);
+    if (numFmtsChanged) {
+      out = numFmtsS !== null ? put(out, "numFmts", numFmts)
+          : out.replace(/(<styleSheet\b[^>]*>)/, function(m, a) { return a + '<numFmts count="' + numFmts.length + '">' + numFmts.join("") + "</numFmts>"; });
+    }
+    zip.file("xl/styles.xml", out);
+  }
+
+  return { styleFor: styleFor, colStyleFor: colStyleFor, groupHeaderStyle: groupHeaderStyle, save: save };
+}
+
+// The <col> element covering a 0-based column, or null.
+function colDefAt(xml, ci) {
+  var defs = xml.match(/<col\b[^>]*\/>/g) || [];
+  for (var i = 0; i < defs.length; i++) {
+    var mn = parseInt((defs[i].match(/\bmin="(\d+)"/) || [])[1], 10);
+    var mx = parseInt((defs[i].match(/\bmax="(\d+)"/) || [])[1], 10);
+    if (ci + 1 >= mn && ci + 1 <= mx) return defs[i];
+  }
+  return null;
+}
+
+function setColSpan(def, mn, mx) {
+  return def.replace(/\bmin="\d+"/, 'min="' + mn + '"').replace(/\bmax="\d+"/, 'max="' + mx + '"');
+}
+
+// Give each appended column its own <col> definition: the template's usual column width, and
+// the number format of its look-alike template column. A span covering the column is split.
+function addAppendedColDefs(xml, cols, origXml, styleBook) {
+  var widths = {};
+  (origXml.match(/<col\b[^>]*\/>/g) || []).forEach(function(d) {
+    var w = (d.match(/\bwidth="([\d.]+)"/) || [])[1];
+    if (w) widths[w] = (widths[w] || 0) + 1;
+  });
+  var commonWidth = Object.keys(widths).sort(function(a, b) { return widths[b] - widths[a]; })[0];
+  var colsM = xml.match(/<cols\b[^>]*>([\s\S]*?)<\/cols>/);
+  var list = colsM ? (colsM[1].match(/<col\b[^>]*\/>/g) || []) : [];
+  var added = 0;
+  cols.forEach(function(c) {
+    var like  = c.likeCi !== undefined ? colDefAt(origXml, c.likeCi) : null;
+    var style = like ? (like.match(/\bstyle="(\d+)"/) || [])[1] : null;
+    if (!style && styleBook) style = styleBook.colStyleFor(c.formatKey);
+    if (!style && !commonWidth) return;
+    var def = '<col min="1" max="1"' + (commonWidth ? ' width="' + commonWidth + '" customWidth="1"' : '') +
+              (style ? ' style="' + style + '"' : '') + '/>';
+    var p = c.ci + 1, out = [];
+    list.forEach(function(d) {
+      var mn = parseInt(d.match(/\bmin="(\d+)"/)[1], 10), mx = parseInt(d.match(/\bmax="(\d+)"/)[1], 10);
+      if (p < mn || p > mx) { out.push(d); return; }
+      if (mn < p) out.push(setColSpan(d, mn, p - 1));
+      if (mx > p) out.push(setColSpan(d, p + 1, mx));
+    });
+    out.push(setColSpan(def, p, p));
+    list = out;
+    added++;
+  });
+  if (!added) return xml;
+  list.sort(function(a, b) {
+    return parseInt(a.match(/\bmin="(\d+)"/)[1], 10) - parseInt(b.match(/\bmin="(\d+)"/)[1], 10);
+  });
+  var colsXml = "<cols>" + list.join("") + "</cols>";
+  return colsM ? xml.replace(/<cols\b[^>]*>[\s\S]*?<\/cols>/, colsXml)
+               : xml.replace(/<sheetData\b/, colsXml + "<sheetData");
+}
+
 async function buildOutputBuffer(templateBuf, entityRows, relRows, appendedEntityCols, l4Paths) {
   var zip = await JSZip.loadAsync(templateBuf);
 
@@ -2041,37 +2297,9 @@ async function buildOutputBuffer(templateBuf, entityRows, relRows, appendedEntit
         return (b.groupMatched ? 1 : 0) - (a.groupMatched ? 1 : 0);
       });
 
-      // Look up row-2 style indices from the ORIGINAL XML before any shifts.
-      // For each matched group: read the s="N" of the last existing row-2 cell.
-      // For mandatory detection: scan row-2 cells in the group range for any mandatory col.
-      var groupStyles = {}; // groupKey → {style, mandatoryStyle}
-      insertions.forEach(function(ins) {
-        if (!ins.groupMatched) return;
-        // Style of last row-2 cell in group (before insertion point)
-        var lastColStr = XLSX.utils.encode_col(ins.originalInsertAt - 1);
-        var sMatch = xml.match(new RegExp('<c r="' + lastColStr + '2"[^>]*\\bs="(\\d+)"'));
-        var regularStyle = sMatch ? sMatch[1] : null;
-        // Look for a mandatory cell style by scanning existing row-2 cells in group
-        var mandatoryStyle = null;
-        for (var c = ins.groupStart; c < ins.originalInsertAt && !mandatoryStyle; c++) {
-          var cell = ws[XLSX.utils.encode_cell({ r: 1, c: c })];
-          if (!cell) continue;
-          // Check if cell corresponds to a mandatory appended col in this same group
-          // (Use the mandatory flag from appended cols that matched this display name)
-          var matchedMandatory = ins.cols.some(function(col) {
-            return col.mandatory && col.dispName === String(cell.v || "").trim();
-          });
-          if (matchedMandatory) {
-            var mColStr = XLSX.utils.encode_col(c);
-            var mMatch  = xml.match(new RegExp('<c r="' + mColStr + '2"[^>]*\\bs="(\\d+)"'));
-            if (mMatch) mandatoryStyle = mMatch[1];
-          }
-        }
-        groupStyles[ins.groupKey] = {
-          style:         regularStyle,
-          mandatoryStyle: mandatoryStyle || regularStyle
-        };
-      });
+      // Header styles are read from the template before any column shifts.
+      var origXml   = xml;
+      var styleBook = await loadHeaderStyleBook(zip, xml);
 
       // Apply XML surgery and compute correct ci values, left-to-right
       var correctCiMap    = {}; // placeholder ci → new ci
@@ -2128,18 +2356,21 @@ async function buildOutputBuffer(templateBuf, entityRows, relRows, appendedEntit
 
       // Build final appendedCols list for replaceDataRowsXml header injection
       colsForXml = appendedEntityCols.map(function(col) {
-        var gKey    = (col.group || "").toLowerCase();
-        var gStyle  = groupStyles[gKey] || {};
-        var style   = col.mandatory ? (gStyle.mandatoryStyle || gStyle.style) : gStyle.style;
+        var gKey = (col.group || "").toLowerCase();
         return {
           ci:           correctCiMap[col.ci] !== undefined ? correctCiMap[col.ci] : col.ci,
           dispName:     col.dispName,
           group:        col.group,
           groupMatched: !!groupBounds[gKey],
-          style:        style,
+          style:        styleBook ? styleBook.styleFor(headerLookOf(col)) : null,
+          groupStyle:   styleBook ? styleBook.groupHeaderStyle : null,
+          likeCi:       col.likeCi,
+          formatKey:    col.formatKey,
           mandatory:    col.mandatory
         };
       });
+      xml = addAppendedColDefs(xml, colsForXml, origXml, styleBook);
+      if (styleBook) styleBook.save();
     }
 
     xml = replaceDataRowsXml(xml, entityRows, colsForXml);
@@ -2405,7 +2636,7 @@ async function handleInputFile(file) {
   if (!products.length) { log("err", "No products found."); return; }
 
   // Build DMD map
-  var dmdWb, dmdMap, dmdGroupMap, dmdMandatoryMap, dmdUomMap, dmdTypeMap, dmdPrecisionMap, earMap;
+  var dmdWb, dmdMap, dmdGroupMap, dmdMandatoryMap, dmdUomMap, dmdTypeMap, dmdPrecisionMap, dmdFormatPrecisionMap, dmdMultiMap, earMap;
   try {
     dmdWb  = XLSX.read(dmdBuf, { type: "array" });
     var dmd = buildDmdMap(dmdWb);
@@ -2413,6 +2644,8 @@ async function handleInputFile(file) {
     dmdUomMap = dmd.uomMap || {};
     dmdTypeMap = dmd.typeMap || {};
     dmdPrecisionMap = dmd.precisionMap || {};
+    dmdMultiMap = dmd.multiMap || {};
+    dmdFormatPrecisionMap = dmd.formatPrecisionMap || {};
     earMap = buildEarMap(dmdWb);
     var earProdCount = Object.keys(earMap.product).length;
     var earSkuCount  = Object.keys(earMap.sku).length;
@@ -2443,15 +2676,17 @@ async function handleInputFile(file) {
         if (thn !== tn && String(dmdMap[thn]).toLowerCase() === disp.toLowerCase()) {
           shadowed.push(disp + " (" + thn + " → " + tn + ")");
           delete dmdMap[thn]; delete dmdGroupMap[thn]; delete dmdMandatoryMap[thn];
-          delete dmdUomMap[thn]; delete dmdTypeMap[thn]; delete dmdPrecisionMap[thn];
+          delete dmdUomMap[thn]; delete dmdTypeMap[thn]; delete dmdPrecisionMap[thn]; delete dmdMultiMap[thn]; delete dmdFormatPrecisionMap[thn];
         }
       });
       dmdMap[tn]          = disp;
       dmdGroupMap[tn]     = taxCsa.attrs.groupMap[tn] || "";
       dmdMandatoryMap[tn] = !!taxCsa.attrs.mandatoryMap[tn];
       dmdTypeMap[tn]      = taxCsa.attrs.typeMap[tn] || "";
+      dmdMultiMap[tn]     = !!taxCsa.attrs.multiMap[tn];
       if (taxCsa.attrs.uomMap[tn])            dmdUomMap[tn]       = taxCsa.attrs.uomMap[tn];
       if (taxCsa.attrs.precisionMap[tn] != null) dmdPrecisionMap[tn] = taxCsa.attrs.precisionMap[tn];
+      if (taxCsa.attrs.formatPrecisionMap[tn] != null) dmdFormatPrecisionMap[tn] = taxCsa.attrs.formatPrecisionMap[tn];
       csaAttrs[tn] = true;
     });
     log("info", "Category-specific attributes: <strong>" + Object.keys(csaAttrs).length + "</strong> from the taxonomy model, " +
@@ -2596,6 +2831,8 @@ async function handleInputFile(file) {
         "</strong> unit column(s) populated (" + productUom.reused + " already in the template, " +
         productUom.added + " added; " + productUom.fromInput + " taking the unit from the input file)");
     }
+    tagAppendedCols(appendedProdCols, prodMap, dmdReverse, { csa: csaAttrs, multi: dmdMultiMap, mandatory: dmdMandatoryMap, earMandatory: earMap.mandatory.product, type: dmdTypeMap, precision: dmdFormatPrecisionMap });
+    warnMissingGroups(appendedProdCols, prodWb, "Product");
     state.appendedProdCols = appendedProdCols;
 
     var prodIdCi       = resolveOne(THG_PRODUCT_ID, dmdMap, prodMap);
@@ -2677,6 +2914,8 @@ async function handleInputFile(file) {
         "</strong> unit column(s) populated (" + skuUom.reused + " already in the template, " +
         skuUom.added + " added; " + skuUom.fromInput + " taking the unit from the input file)");
     }
+    tagAppendedCols(appendedSkuCols, skuMap, dmdReverse, { csa: csaAttrs, multi: dmdMultiMap, mandatory: dmdMandatoryMap, earMandatory: earMap.mandatory.sku, type: dmdTypeMap, precision: dmdFormatPrecisionMap });
+    warnMissingGroups(appendedSkuCols, skuWb, "SKU");
     state.appendedSkuCols = appendedSkuCols;
 
     var skuIdCi     = resolveOne(THG_SKU_ID,     dmdMap, skuMap);
