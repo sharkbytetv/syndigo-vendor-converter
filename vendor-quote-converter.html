@@ -397,7 +397,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 const RELATIONSHIP_TYPE = "sku@@Product";
 // Bump on every change that gets pushed. Shown next to the page title so you can confirm
 // at a glance which build the browser is actually running.
-const APP_VERSION = "2.5.2";
+const APP_VERSION = "2.6.0";
 const APP_BUILT   = "2026-10-07";
 
 const PROD_TMPL_KEY = "syndigo_prod_tmpl_v2";
@@ -1097,14 +1097,20 @@ function buildColMap(wb, sheetName) {
 
 function isRegister(wb) { return wb.SheetNames.indexOf("Issued") >= 0; }
 
+// Headers on row 1, data from row 2.
 function parseRegister(wb) {
   var ws = wb.Sheets["Issued"];
   if (!ws) throw new Error("No 'Issued' sheet found.");
+  // Read from A1 even if the sheet's declared range starts lower, so row 1 is always the header
+  var origRef = ws["!ref"];
+  if (origRef) ws["!ref"] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: XLSX.utils.decode_range(origRef).e });
   var rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
-  var headers = (rows[2] || []).map(function(h) { return String(h).trim(); });
+  ws["!ref"] = origRef;
+  var headers = (rows[0] || []).map(function(h) { return String(h).trim(); });
   var sidIdx  = headers.indexOf("BBB SKU ID");
+  if (sidIdx < 0) throw new Error("'Issued' sheet has no 'BBB SKU ID' column in row 1 — the register's headers must start on row 1.");
   var data = [];
-  for (var i = 3; i < rows.length; i++) {
+  for (var i = 1; i < rows.length; i++) {
     var row = rows[i];
     if (!row.some(function(c) { return c !== "" && c !== null && c !== undefined; })) continue;
     if (sidIdx >= 0 && !row[sidIdx]) continue;
