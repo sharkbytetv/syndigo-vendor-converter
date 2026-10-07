@@ -397,8 +397,8 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 const RELATIONSHIP_TYPE = "sku@@Product";
 // Bump on every change that gets pushed. Shown next to the page title so you can confirm
 // at a glance which build the browser is actually running.
-const APP_VERSION = "2.5.1";
-const APP_BUILT   = "2026-10-06";
+const APP_VERSION = "2.5.2";
+const APP_BUILT   = "2026-10-07";
 
 const PROD_TMPL_KEY = "syndigo_prod_tmpl_v2";
 const SKU_TMPL_KEY  = "syndigo_sku_tmpl_v2";
@@ -815,7 +815,7 @@ function uomCellValue(row, col) {
 // an attribute can be mandatory on one entity only, which the E-A-R records, not ATTRIBUTES.
 function buildEarMap(wb) {
   var ws = wb.Sheets["E-A-R MODEL"];
-  if (!ws) return { product: {}, sku: {} };
+  if (!ws) return { product: {}, sku: {}, mandatory: { product: {}, sku: {} } };
 
   var range = XLSX.utils.decode_range(ws["!ref"] || "A1");
   var entityMap = { product: {}, sku: {}, mandatory: { product: {}, sku: {} } };
