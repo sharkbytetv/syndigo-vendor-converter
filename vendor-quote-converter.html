@@ -397,8 +397,8 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 const RELATIONSHIP_TYPE = "sku@@Product";
 // Bump on every change that gets pushed. Shown next to the page title so you can confirm
 // at a glance which build the browser is actually running.
-const APP_VERSION = "2.7.0";
-const APP_BUILT   = "2026-10-22";
+const APP_VERSION = "2.7.1";
+const APP_BUILT   = "2026-10-23";
 
 const PROD_TMPL_KEY = "syndigo_prod_tmpl_v2";
 const SKU_TMPL_KEY  = "syndigo_sku_tmpl_v2";
@@ -1259,9 +1259,11 @@ var VQS_STRUCTURE = { _productgroup: "group", _l1: "l1", _l2: "l2", _l3: "l3", t
 // VQS headers that are not a model display name.
 var VQS_LABELS = {
   "Product Group #": "_productgroup", "L1 Category": "_l1", "L2 Sub-Category": "_l2", "L3 Class": "_l3",
-  "L4 Product Type": "thgl4hierarchynode", "Vendor SKU / Model #": "thgitemmodel",
+  "L4 Product Type": "thgl4hierarchynode", "Item / Model #": "thgitemmodel",
+  "Vendor SKU / Model #": "thgitemmodel",   // header used by VQS files built before v2.7.1
   "Product Dimensions": "thgproductdimensionslwh", "Packaged Unit Dimensions": "thgunitdimensionslwh",
-  "Inner Dimensions": "thginnerdimensionslwh", "Case Dimensions": "thgcasedimensionslwh"
+  "Inner Dimensions": "thginnerdimensionslwh", "Case Dimensions": "thgcasedimensionslwh",
+  "Retail Price": "thgsellingprice"
 };
 var CM_PER_UNIT = { mm: 0.1, cm: 1, m: 100, "in": 2.54, ft: 30.48, yd: 91.44 };
 
