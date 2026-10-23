@@ -299,7 +299,7 @@
         <div class="file-status" id="tax-status"></div>
       </div>
       <div class="tmpl-slot">
-        <label>Syndigo Product Export <span style="font-weight:400;font-size:0.85em;color:#888">(optional — product UUIDs for the SKU Relationships sheet)</span></label>
+        <label>Syndigo Product Export <span style="font-weight:400;font-size:0.85em;color:#888">(optional — links SKUs to their products in Syndigo; for a VQS, the export of its newly created products)</span></label>
         <div class="drop-zone" id="export-drop">
           <div class="drop-icon">🔗</div>
           <strong>Syndigo product export.xlsm</strong>
@@ -397,8 +397,8 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 const RELATIONSHIP_TYPE = "sku@@Product";
 // Bump on every change that gets pushed. Shown next to the page title so you can confirm
 // at a glance which build the browser is actually running.
-const APP_VERSION = "2.6.0";
-const APP_BUILT   = "2026-10-07";
+const APP_VERSION = "2.7.0";
+const APP_BUILT   = "2026-10-22";
 
 const PROD_TMPL_KEY = "syndigo_prod_tmpl_v2";
 const SKU_TMPL_KEY  = "syndigo_sku_tmpl_v2";
@@ -940,7 +940,7 @@ function buildTaxonomyPathMap(wb) {
   }
 
   var catWs = wb.Sheets["CATEGORIES"];
-  if (!catWs) return { pathMap: {}, nodeMap: {}, parentOf: {}, taxonomyName: taxName };
+  if (!catWs) return { pathMap: {}, nodeMap: {}, pathByNode: {}, parentOf: {}, taxonomyName: taxName };
 
   var catRange = XLSX.utils.decode_range(catWs["!ref"] || "A1");
   var nameCi = -1, parentCi = -1, belongsCi = -1, dispCi = -1;
@@ -951,7 +951,7 @@ function buildTaxonomyPathMap(wb) {
     if (ch === "BELONGS TO TAXONOMY") belongsCi= cc;
     if (ch === "DISPLAY NAME")        dispCi   = cc;
   }
-  if (nameCi < 0 || dispCi < 0) return { pathMap: {}, nodeMap: {}, parentOf: {}, taxonomyName: taxName };
+  if (nameCi < 0 || dispCi < 0) return { pathMap: {}, nodeMap: {}, pathByNode: {}, parentOf: {}, taxonomyName: taxName };
 
   // name → {displayName, parent (node name)}
   var nodes = {};
@@ -982,16 +982,17 @@ function buildTaxonomyPathMap(wb) {
   // Build pathMap keyed by lowercase displayName for case-insensitive lookup.
   // When multiple nodes share a display name, prefer leaf nodes (not a parent of anyone).
   // nodeMap follows the same leaf preference, so a display name's path and node always agree.
-  var pathMap = {}, nodeMap = {}, parentOf = {};
+  var pathMap = {}, nodeMap = {}, parentOf = {}, pathByNode = {};
   Object.keys(nodes).forEach(function(name) {
     parentOf[name] = nodes[name].parent;
     var path = buildPath(name, 0);
     if (!path) return;
+    pathByNode[name] = path;
     var key = nodes[name].displayName.toLowerCase();
     if (!pathMap[key] || !isParent[name]) { pathMap[key] = path; nodeMap[key] = name; }
   });
 
-  return { pathMap: pathMap, nodeMap: nodeMap, parentOf: parentOf, taxonomyName: taxName };
+  return { pathMap: pathMap, nodeMap: nodeMap, pathByNode: pathByNode, parentOf: parentOf, taxonomyName: taxName };
 }
 
 // Auto-match input headers to template columns and DMD attributes.
@@ -1085,7 +1086,12 @@ function buildColMap(wb, sheetName) {
     var cell = ws[XLSX.utils.encode_cell({r: 1, c: c})];
     if (cell && cell.v != null) {
       var name = String(cell.v).trim();
-      if (name) map[name] = c;
+      if (!name) continue;
+      map[name] = c;
+      // Locale-split exports name a translatable column "X//en-US" (units "X//en-US.UOM").
+      // The default-locale column is the attribute itself; "X//fr-CA" stays its French twin.
+      var loc = /^(.*)\/\/en-US(\.UOM)?$/.exec(name);
+      if (loc && map[loc[1] + (loc[2] || "")] === undefined) map[loc[1] + (loc[2] || "")] = c;
     }
   }
   return map;
@@ -1237,13 +1243,195 @@ function groupSKUsIntoProducts(skus) {
 }
 
 // ============================================================
+// VQS PARSER  (universal vendor quote sheet generated from the models)
+// ============================================================
+// Columns are matched by their header name (row 4), never by position: the header moves with
+// its data when a column is cut, moved or inserted. A header is the attribute's display name in
+// the models, a VQS label from VQS_LABELS, or either with " — L / W / H / unit / French".
+// How each attribute is treated comes from those suffixes and the loaded models.
+// "Matrix" maps each L1|L2|L3|L4 choice to its taxonomy node. IDs are never written: Syndigo
+// generates Product and SKU IDs. Products go in first, named VQS-<stamp>-<group>; the SKU pass
+// finds them by that Name in a product export and links each SKU to the generated Product ID.
+
+var VQS_HEADER_ROW = 3;  // 0-based: headers on row 4
+var VQS_FIRST_ROW = 4;   // 0-based: data starts on row 5
+var VQS_STRUCTURE = { _productgroup: "group", _l1: "l1", _l2: "l2", _l3: "l3", thgl4hierarchynode: "l4" };
+// VQS headers that are not a model display name.
+var VQS_LABELS = {
+  "Product Group #": "_productgroup", "L1 Category": "_l1", "L2 Sub-Category": "_l2", "L3 Class": "_l3",
+  "L4 Product Type": "thgl4hierarchynode", "Vendor SKU / Model #": "thgitemmodel",
+  "Product Dimensions": "thgproductdimensionslwh", "Packaged Unit Dimensions": "thgunitdimensionslwh",
+  "Inner Dimensions": "thginnerdimensionslwh", "Case Dimensions": "thgcasedimensionslwh"
+};
+var CM_PER_UNIT = { mm: 0.1, cm: 1, m: 100, "in": 2.54, ft: 30.48, yd: 91.44 };
+
+function isVqs(wb) {
+  var ws = wb.Sheets["VQS"];
+  var a1 = ws && ws["A1"] ? String(ws["A1"].v || "") : "";
+  return a1.indexOf("VQS|") === 0;
+}
+
+function sheetRowsFromA1(wb, name) {
+  var ws = wb.Sheets[name];
+  if (!ws || !ws["!ref"]) return [];
+  var origRef = ws["!ref"];
+  ws["!ref"] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: XLSX.utils.decode_range(origRef).e });
+  var rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
+  ws["!ref"] = origRef;
+  return rows;
+}
+
+// Same vendor and products give the same stamp, so the SKU pass can recompute it.
+function vqsStamp(vendor, groupKeys) {
+  var text = String(vendor || "") + "|" + groupKeys.slice().sort().join("|");
+  var h = 0x811c9dc5;
+  for (var i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return ("000000" + h.toString(36).toUpperCase()).slice(-6);
+}
+
+// Column definitions from one sheet's header names. model = { type, multi, dispToThg }.
+function vqsColumns(rows, sheet, model, issues) {
+  var heads = rows[VQS_HEADER_ROW] || [], seen = {}, defs = [], dimBases = {};
+  var attrOf = function(label) { return VQS_LABELS[label] || model.dispToThg[label] || ""; };
+  var parsed = heads.map(function(raw) {
+    var label = String(raw == null ? "" : raw).trim();
+    var m = /^(.*) — (L|W|H|unit|French|English)$/.exec(label);
+    var part = m ? m[2] : "", base = attrOf(m ? m[1] : label);
+    if (part === "L" || part === "W" || part === "H") dimBases[base] = true;
+    return { label: label, part: part, base: base };
+  });
+  parsed.forEach(function(h, ci) {
+    if (!h.label || h.label === "Status") return;
+    if (sheet === "French" && h.part !== "French") return;   // the rest is copied from the VQS tab
+    if (!h.base) { issues.unnamed[sheet + " " + XLSX.utils.encode_col(ci) + " “" + h.label + "”"] = true; return; }
+    var key = h.base + (h.part ? "|" + h.part : "");
+    if (seen[key]) { issues.duplicate[sheet + " “" + h.label + "”"] = true; return; }
+    seen[key] = true;
+    var d = { key: key, label: h.label, base: h.base, sheet: sheet, ci: ci, kind: "value", dim: "" };
+    var type = String(model.type[h.base] || "").toLowerCase();
+    if (VQS_STRUCTURE[h.base]) d.kind = VQS_STRUCTURE[h.base];
+    else if (h.part === "French") d.kind = "fr";
+    else if (dimBases[h.base] && /^(L|W|H|unit)$/.test(h.part)) { d.dim = h.base; d.kind = "dim"; }
+    else if (h.part === "unit") d.kind = "uom";
+    else if (type === "boolean") d.kind = "bool";
+    else if (type === "list of values" && model.multi[h.base]) d.kind = "lovmulti";
+    defs.push(d);
+  });
+  return defs;
+}
+
+function vqsNum(x) { return String(Math.round(Number(x) * 100) / 100); }
+
+function parseVqs(wb, dmdMap, model) {
+  var main = sheetRowsFromA1(wb, "VQS"), fr = sheetRowsFromA1(wb, "French");
+  var issues = { unmapped: {}, badL4: [], notOk: [], badDim: [], noGroup: [], duplicate: {}, unnamed: {} };
+  var defs = vqsColumns(main, "VQS", model, issues).concat(vqsColumns(fr, "French", model, issues));
+  var have = {};
+  defs.forEach(function(d) { have[d.base] = true; });
+  var structural = { _productgroup: "Product Group #", _l1: "L1 Category", _l2: "L2 Sub-Category",
+                     _l3: "L3 Class", thgl4hierarchynode: "L4 Product Type" };
+  var missing = Object.keys(structural).filter(function(k) { return !have[k]; });
+  if (missing.length) throw new Error("the VQS tab has no " + missing.map(function(k) { return "“" + structural[k] + "”"; }).join(", ") +
+    " column — its header may have been renamed or deleted");
+
+  var nodeOf = {};
+  sheetRowsFromA1(wb, "Matrix").slice(2).forEach(function(r) { if (r[0] && r[1]) nodeOf[String(r[0])] = String(r[1]); });
+
+  var named = {};
+  defs.forEach(function(d) { if (d.sheet === "VQS") named[d.ci] = true; });
+  var rows = [], headers = {};
+  for (var r = VQS_FIRST_ROW; r < main.length; r++) {
+    var line = main[r] || [];
+    var filled = false;
+    for (var c = 1; c < line.length; c++) {
+      if (line[c] === "" || line[c] == null) continue;
+      if (named[c]) filled = true;
+    }
+    if (!filled) continue;
+    var rec = { _row: r + 1, _status: String(line[0] || "").trim() }, dims = {}, path = [];
+    defs.forEach(function(d) {
+      var src = d.sheet === "French" ? (fr[r] || []) : line;
+      var v = src[d.ci];
+      if (v == null) return;
+      if (typeof v === "string") v = v.trim();
+      if (v === "") return;
+      if (d.kind === "group") { rec._group = String(v); return; }
+      if (/^l[1-4]$/.test(d.kind)) { path[Number(d.kind[1]) - 1] = String(v); return; }
+      if (d.dim) { (dims[d.dim] = dims[d.dim] || {})[d.key.split("|").pop()] = v; return; }
+      var disp = dmdMap[d.base];
+      if (!disp) { issues.unmapped[d.label] = true; return; }
+      // Values go in as typed; only the format changes (Yes/No, ";" lists, units, dimensions).
+      if (d.kind === "fr")       rec[disp + "//fr-CA"] = String(v);
+      else if (d.kind === "uom") rec[disp + ".UOM"] = String(v);
+      else if (d.kind === "bool") {
+        var b = String(v).toLowerCase();
+        rec[disp] = (b === "yes" || b === "true") ? "true" : (b === "no" || b === "false") ? "false" : String(v);
+      }
+      else if (d.kind === "lovmulti") {
+        rec[disp] = String(v).split(";").map(function(x) { return x.trim(); }).filter(Boolean).join("||");
+      }
+      else rec[disp] = v;
+    });
+    // L x W x H + unit become Syndigo's one string, in cm like the existing data.
+    Object.keys(dims).forEach(function(dk) {
+      var g = dims[dk], disp = dmdMap[dk];
+      if (!disp) { issues.unmapped[dk] = dk; return; }
+      var f = CM_PER_UNIT[String(g.unit || "").toLowerCase()];
+      var parts = [g.L, g.W, g.H];
+      if (!f || parts.some(function(x) { return x === undefined || isNaN(Number(x)); })) {
+        issues.badDim.push({ row: r + 1, field: disp });
+        return;
+      }
+      rec[disp] = parts.map(function(x) { return vqsNum(Number(x) * f); }).join(" x ");
+    });
+    if (path.length === 4) {
+      rec["L4 Hierarchy Node"] = path[3];
+      rec._l4Node = nodeOf[path.join("|")] || "";
+      if (!rec._l4Node) issues.badL4.push({ row: r + 1, path: path.join(" > ") });
+    } else {
+      issues.badL4.push({ row: r + 1, path: path.join(" > ") || "(none)" });
+    }
+    if (!rec._group) issues.noGroup.push(r + 1);
+    if (rec._status.indexOf("OK") !== 0) issues.notOk.push({ row: r + 1, status: rec._status });
+    Object.keys(rec).forEach(function(k) { if (k.charAt(0) !== "_") headers[k] = true; });
+    rows.push(rec);
+  }
+  return { rows: rows, headers: Object.keys(headers), issues: issues };
+}
+
+// Product export rows keyed by entity Name, plus Vendor + Product Name as a fallback.
+function buildVqsLinkMap(wb) {
+  var rows = sheetRowsFromA1(wb, "Entities");
+  var hi = -1;
+  for (var r = 0; r < Math.min(6, rows.length); r++) {
+    var cand = (rows[r] || []).map(function(h) { return String(h).replace(/\/\/en-US$/, "").trim(); });
+    if (cand.indexOf("ID") >= 0 && cand.indexOf("Name") >= 0) { hi = r; break; }
+  }
+  if (hi < 0) throw new Error("no ID / Name header in the export's Entities sheet");
+  var h = rows[hi].map(function(x) { return String(x).replace(/\/\/en-US$/, "").trim(); });
+  var ix = function(n) { return h.indexOf(n); };
+  var byName = {}, byProduct = {};
+  for (var i = hi + 1; i < rows.length; i++) {
+    var row = rows[i];
+    if (String(row[ix("Type")] || "").trim() !== "product") continue;
+    var link = { uuid: String(row[ix("ID")] || "").trim(), pid: String(row[ix("Product ID")] || "").trim(),
+                 name: String(row[ix("Name")] || "").trim() };
+    if (link.name) byName[link.name] = link;
+    var key = (String(row[ix("Vendor")] || "") + "|" + String(row[ix("Product Name")] || "")).trim().toLowerCase();
+    (byProduct[key] = byProduct[key] || []).push(link);
+  }
+  return { byName: byName, byProduct: byProduct };
+}
+
+// ============================================================
 // ROW BUILDERS  (return {colIndex: value})
 // ============================================================
 
 function buildProductRow(product, resolvedCols, prodIdCi, prodTypeCi, prodNameCi) {
   var cells = {};
   if (prodTypeCi !== undefined)                       cells[prodTypeCi] = "product";
-  if (prodNameCi !== undefined && product._productId) cells[prodNameCi] = String(product._productId);
+  var prodName = product._entityName || product._productId;
+  if (prodNameCi !== undefined && prodName)           cells[prodNameCi] = String(prodName);
   if (prodIdCi   !== undefined && product._productId) cells[prodIdCi]   = String(product._productId);
   for (var i = 0; i < resolvedCols.length; i++) {
     var col = resolvedCols[i];
@@ -1263,7 +1451,8 @@ function buildSKURow(sku, resolvedCols, skuIdCi, skuProdIdCi, skuTypeCi, skuName
   var cells = {};
   if (skuSeqCi !== undefined) cells[skuSeqCi] = String(seqNum);
   if (skuTypeCi   !== undefined)                    cells[skuTypeCi]   = "sku";
-  if (skuNameCi   !== undefined && sku._productId)  cells[skuNameCi]   = String(sku._productId);
+  var skuName = sku._entityName || sku._productId;
+  if (skuNameCi   !== undefined && skuName)         cells[skuNameCi]   = String(skuName);
   if (skuIdCi     !== undefined && sku._skuId)      cells[skuIdCi]     = String(sku._skuId);
   if (skuProdIdCi !== undefined && sku._productId)  cells[skuProdIdCi] = String(sku._productId);
   for (var i = 0; i < resolvedCols.length; i++) {
@@ -2615,6 +2804,7 @@ async function handleInputFile(file) {
   catch(e) { log("err", "Could not parse file: " + escHtml(e.message)); return; }
 
   var products, allSkus, inputHeaders, registerFlow = false;
+  var vqsFlow = false, vqs = null;
 
   if (isRegister(inputWb)) {
     registerFlow = true;
@@ -2626,6 +2816,12 @@ async function handleInputFile(file) {
     var g = groupRegisterRows(rows);
     products = g.products; allSkus = g.skus;
     log("ok", "Parsed <strong>" + allSkus.length + "</strong> SKUs across <strong>" + products.length + "</strong> products");
+  } else if (isVqs(inputWb)) {
+    // Read once the models are loaded: the VQS names attributes by key, not display name.
+    vqsFlow = true;
+    products = []; allSkus = []; inputHeaders = [];
+    var vqsStampCell = String((inputWb.Sheets["VQS"]["A1"] || {}).v || "");
+    log("info", "Format: <strong>Vendor quote sheet</strong> (" + escHtml(vqsStampCell.split("|").slice(1).join(" · ")) + ")");
   } else {
     log("info", "Format: <strong>Vendor Quote Sheet</strong>");
     var skus;
@@ -2639,7 +2835,7 @@ async function handleInputFile(file) {
     (g.warnings || []).slice(0, 5).forEach(function(w) { log("warn", escHtml(w)); });
     log("ok", "Grouped: <strong>" + products.length + "</strong> products, <strong>" + allSkus.length + "</strong> SKUs");
   }
-  if (!products.length) { log("err", "No products found."); return; }
+  if (!vqsFlow && !products.length) { log("err", "No products found."); return; }
 
   // Build DMD map
   var dmdWb, dmdMap, dmdGroupMap, dmdMandatoryMap, dmdUomMap, dmdTypeMap, dmdPrecisionMap, dmdFormatPrecisionMap, dmdMultiMap, earMap;
@@ -2713,6 +2909,89 @@ async function handleInputFile(file) {
 
   var dmdReverse = buildDmdReverseMaps({ map: dmdMap, groupMap: dmdGroupMap, mandatoryMap: dmdMandatoryMap });
 
+  if (vqsFlow) {
+    try { vqs = parseVqs(inputWb, dmdMap, { type: dmdTypeMap, multi: dmdMultiMap, dispToThg: dmdReverse.dispToThg }); }
+    catch(e) { log("err", "VQS error: " + escHtml(e.message)); return; }
+    var vi = vqs.issues;
+    if (!vqs.rows.length) { log("err", "The VQS has no filled-in rows."); return; }
+    var unm = Object.keys(vi.unmapped);
+    if (unm.length) log("warn", "<strong>" + unm.length + "</strong> VQS column(s) have no attribute in the loaded models and are skipped: " +
+      unm.map(function(k) { return "&ldquo;" + escHtml(k) + "&rdquo;"; }).join(", ") + ". Rebuild the VQS from the current models.");
+    var dup = Object.keys(vi.duplicate), unnamed = Object.keys(vi.unnamed);
+    if (dup.length) log("warn", "Column name(s) appear twice in the VQS, so only the first is used: " + dup.map(escHtml).join(", "));
+    if (unnamed.length) log("warn", "Column header(s) not recognised, so those columns are skipped: " + unnamed.map(escHtml).join(", ") +
+      ". A header must be the attribute's name from the models (or the VQS label); a column inserted by hand is ignored.");
+    if (vi.noGroup.length) log("err", "<strong>" + vi.noGroup.length + "</strong> row(s) have no Product Group # and are left out: row(s) " + vi.noGroup.slice(0, 15).join(", "));
+    if (vi.badL4.length) log("warn", "<strong>" + vi.badL4.length + "</strong> row(s) have an L1–L4 choice that is incomplete or not in the taxonomy: " +
+      vi.badL4.slice(0, 8).map(function(b) { return "row " + b.row + " (" + escHtml(b.path) + ")"; }).join(", "));
+    if (vi.badDim.length) log("warn", "<strong>" + vi.badDim.length + "</strong> dimension value(s) need L, W, H and a unit and were left out: " +
+      vi.badDim.slice(0, 8).map(function(b) { return "row " + b.row + " " + escHtml(b.field); }).join(", "));
+    if (vi.notOk.length) log("warn", "<strong>" + vi.notOk.length + "</strong> of " + vqs.rows.length + " row(s) don't show OK in the VQS Status column. " +
+      "They are converted anyway — check them before importing: " +
+      vi.notOk.slice(0, 10).map(function(n) { return "row " + n.row + " (" + escHtml(n.status) + ")"; }).join("; ") +
+      (vi.notOk.length > 10 ? "; and " + (vi.notOk.length - 10) + " more" : ""));
+
+    var vendorDisp = dmdMap["thgvendor"], nameDisp = dmdMap["thgproductname"];
+    var byGroup = {}, groupOrder = [];
+    vqs.rows.forEach(function(rec) {
+      if (!rec._group) return;
+      if (!byGroup[rec._group]) { byGroup[rec._group] = []; groupOrder.push(rec._group); }
+      byGroup[rec._group].push(rec);
+    });
+    var vendor = vendorDisp ? (vqs.rows[0][vendorDisp] || "") : "";
+    var stamp = vqsStamp(vendor, groupOrder.map(function(g) { return g + "=" + (byGroup[g][0][nameDisp] || ""); }));
+    vqs.stamp = stamp;
+
+    // A product export that contains this VQS's products switches to the SKU pass.
+    var links = null;
+    var expBuf = loadTemplateBuffer(EXPORT_KEY);
+    if (expBuf) {
+      try { links = buildVqsLinkMap(XLSX.read(expBuf, { type: "array" })); }
+      catch(e) { log("warn", "Syndigo product export could not be read for VQS links: " + escHtml(e.message)); }
+    }
+    var linked = {}, viaName = 0, viaProduct = 0;
+    if (links) {
+      groupOrder.forEach(function(g) {
+        var hit = links.byName["VQS-" + stamp + "-" + g];
+        if (hit && hit.pid) { linked[g] = hit; viaName++; return; }
+        var key = (String(vendor) + "|" + String(byGroup[g][0][nameDisp] || "")).trim().toLowerCase();
+        var cand = (links.byProduct[key] || []).filter(function(l) { return l.pid; });
+        if (cand.length === 1) { linked[g] = cand[0]; viaProduct++; }
+      });
+    }
+    vqs.skuPass = Object.keys(linked).length > 0;
+
+    groupOrder.forEach(function(g) {
+      var first = byGroup[g][0], p = {};
+      for (var k in first) p[k] = first[k];
+      p._entityName = "VQS-" + stamp + "-" + g;
+      p._productId = vqs.skuPass && linked[g] ? linked[g].pid : "";
+      products.push(p);
+      byGroup[g].forEach(function(rec, i) {
+        rec._skuId = "";
+        rec._productId = p._productId;
+        rec._entityName = p._entityName + "-" + ("0" + (i + 1)).slice(-2);
+        if (!vqs.skuPass || linked[g]) allSkus.push(rec);
+      });
+    });
+    inputHeaders = vqs.headers;
+    log("ok", "VQS: <strong>" + vqs.rows.length + "</strong> SKU row(s) in <strong>" + groupOrder.length +
+      "</strong> product group(s) — file stamp <strong>" + stamp + "</strong>; products are named VQS-" + stamp + "-P…");
+    if (vqs.skuPass) {
+      var missing = groupOrder.filter(function(g) { return !linked[g]; });
+      log("ok", "SKU pass: <strong>" + Object.keys(linked).length + "</strong> product group(s) found in the Syndigo export" +
+        (viaProduct ? " (" + viaName + " by name, " + viaProduct + " by vendor + product name)" : "") +
+        " — SKUs will link to their generated Product IDs. The product file is not needed again.");
+      if (missing.length) log("err", "<strong>" + missing.length + "</strong> product group(s) are not in the export, so their SKUs are left out: " +
+        missing.slice(0, 15).map(escHtml).join(", ") + ". Re-export after those products are created.");
+      if (!allSkus.length) { log("err", "No SKUs to write."); return; }
+    } else {
+      log("info", "Product pass: Product IDs are left blank for Syndigo to generate. " +
+        "Next: import the product file, export those products from Syndigo, load the export in Step 1 " +
+        "(Syndigo Product Export), then drop this VQS again for the SKU file.");
+    }
+  }
+
   // Taxonomy paths — L4 names become full paths, and each SKU learns which category-specific
   // attributes its L4 binds.
   if (taxWb) {
@@ -2724,6 +3003,10 @@ async function handleInputFile(file) {
         products.forEach(function(p) {
           var h = l4HeaderOf(p);
           var raw = h ? p[h] : "";
+          // VQS rows carry their exact node; L4 names repeat across the taxonomy.
+          if (raw && p._l4Node && taxResult.pathByNode[p._l4Node]) {
+            p._l4TypeRaw = raw; p[h] = taxResult.pathByNode[p._l4Node]; return;
+          }
           if (raw) {
             p._l4TypeRaw = raw;
             var path = taxPathMap[String(raw).toLowerCase()];
@@ -2739,9 +3022,10 @@ async function handleInputFile(file) {
           if (!raw) return;
           var key = raw.split(">>").pop().trim().toLowerCase();
           s._l4TypeRaw = raw;
-          var path = taxPathMap[key];
+          var exact = s._l4Node && taxResult.pathByNode[s._l4Node];
+          var path = exact ? taxResult.pathByNode[s._l4Node] : taxPathMap[key];
           if (path) s[h] = path;
-          var node = taxResult.nodeMap[key];
+          var node = exact ? s._l4Node : taxResult.nodeMap[key];
           if (node) s._csaAllowed = csaAllowedFor(node, taxCsa.boundByNode, taxResult.parentOf);
           else      unresolvedL4[raw] = (unresolvedL4[raw] || 0) + 1;
         });
@@ -2869,6 +3153,14 @@ async function handleInputFile(file) {
     log("ok", "Products: <strong>" + products.length + "</strong> rows ready");
   } catch(e) { log("err", "Product build failed: " + escHtml(e.message)); console.error(e); return; }
 
+  state.fileTag = vqsFlow ? "VQS-" + vqs.stamp + "_" : "";
+  if (vqsFlow && !vqs.skuPass) {
+    document.getElementById("btn-dl-products").disabled = false;
+    setStatus("input-status", "ok", "&#x2713; " + escHtml(file.name) + " — " + products.length +
+      " products ready (SKU file comes after the products are in Syndigo)");
+    return;
+  }
+
   // ── SKU ──────────────────────────────────────────────────────
   try {
     var skuWb  = XLSX.read(skuBuf,  { type: "array" });
@@ -2985,10 +3277,12 @@ async function handleInputFile(file) {
     log("ok", "SKUs: <strong>" + allSkus.length + "</strong> rows ready");
   } catch(e) { log("err", "SKU build failed: " + escHtml(e.message)); console.error(e); return; }
 
-  document.getElementById("btn-dl-products").disabled = false;
+  // A VQS SKU pass must not offer the product file again: it would create the products twice.
+  document.getElementById("btn-dl-products").disabled = vqsFlow;
   document.getElementById("btn-dl-skus").disabled     = false;
   setStatus("input-status", "ok", "&#x2713; " + escHtml(file.name) + " — " +
-    products.length + " products, " + allSkus.length + " SKUs ready");
+    (vqsFlow ? allSkus.length + " SKUs ready, linked to " + products.filter(function(p) { return p._productId; }).length + " products"
+             : products.length + " products, " + allSkus.length + " SKUs ready"));
 }
 
 // ============================================================
@@ -3002,7 +3296,7 @@ document.getElementById("btn-dl-products").addEventListener("click", async funct
   try {
     var buf = await buildOutputBuffer(state.prodTemplateBuf, state.productRows, null, state.appendedProdCols || [], state.l4Paths || null);
     var ts = new Date().toISOString().replace(/[-:]/g, "").replace("T", "_").slice(0, 15);
-    downloadBuf(buf, "Syndigo_Product_Import_" + ts + ".xlsm");
+    downloadBuf(buf, "Syndigo_Product_Import_" + (state.fileTag || "") + ts + ".xlsm");
   } catch(e) {
     log("err", "Download failed: " + escHtml(e.message));
     console.error(e);
@@ -3018,7 +3312,7 @@ document.getElementById("btn-dl-skus").addEventListener("click", async function(
   try {
     var buf = await buildOutputBuffer(state.skuTemplateBuf, state.skuRows, state.skuRelRows, state.appendedSkuCols || []);
     var ts = new Date().toISOString().replace(/[-:]/g, "").replace("T", "_").slice(0, 15);
-    downloadBuf(buf, "Syndigo_SKU_Import_" + ts + ".xlsm");
+    downloadBuf(buf, "Syndigo_SKU_Import_" + (state.fileTag || "") + ts + ".xlsm");
   } catch(e) {
     log("err", "Download failed: " + escHtml(e.message));
     console.error(e);
