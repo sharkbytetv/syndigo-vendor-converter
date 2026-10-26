@@ -397,8 +397,8 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 const RELATIONSHIP_TYPE = "sku@@Product";
 // Bump on every change that gets pushed. Shown next to the page title so you can confirm
 // at a glance which build the browser is actually running.
-const APP_VERSION = "2.7.2";
-const APP_BUILT   = "2026-10-23";
+const APP_VERSION = "2.7.3";
+const APP_BUILT   = "2026-10-26";
 
 const PROD_TMPL_KEY = "syndigo_prod_tmpl_v2";
 const SKU_TMPL_KEY  = "syndigo_sku_tmpl_v2";
@@ -1416,12 +1416,25 @@ function buildVqsLinkMap(wb) {
     var row = rows[i];
     if (String(row[ix("Type")] || "").trim() !== "product") continue;
     var link = { uuid: String(row[ix("ID")] || "").trim(), pid: String(row[ix("Product ID")] || "").trim(),
-                 name: String(row[ix("Name")] || "").trim() };
+                 name: String(row[ix("Name")] || "").trim(), values: {} };
+    h.forEach(function(n, c) { if (n && row[c] !== "" && row[c] != null) link.values[n] = row[c]; });
     if (link.name) byName[link.name] = link;
     var key = (String(row[ix("Vendor")] || "") + "|" + String(row[ix("Product Name")] || "")).trim().toLowerCase();
     (byProduct[key] = byProduct[key] || []).push(link);
   }
   return { byName: byName, byProduct: byProduct };
+}
+
+// Export rows that share the most attribute values with a VQS product row (ties are all returned).
+function vqsBestLinks(cand, rec) {
+  var norm = function(v) { return String(v == null ? "" : v).trim().toLowerCase(); };
+  var best = [], top = -1;
+  cand.forEach(function(l) {
+    var score = 0;
+    for (var n in l.values) if (norm(rec[n]) && norm(rec[n]) === norm(l.values[n])) score++;
+    if (score > top) { top = score; best = [l]; } else if (score === top) best.push(l);
+  });
+  return best;
 }
 
 // ============================================================
@@ -2950,14 +2963,22 @@ async function handleInputFile(file) {
       try { links = buildVqsLinkMap(XLSX.read(expBuf, { type: "array" })); }
       catch(e) { log("warn", "Syndigo product export could not be read for VQS links: " + escHtml(e.message)); }
     }
-    var linked = {}, viaName = 0, viaProduct = 0;
+    // Syndigo's create rule overwrites Name with the Product ID, so most links come from each
+    // group's own Vendor + Product Name; same-name products are told apart by their other values.
+    var linked = {}, viaName = 0, viaProduct = 0, taken = {}, ambiguous = [];
     if (links) {
       groupOrder.forEach(function(g) {
         var hit = links.byName["VQS-" + stamp + "-" + g];
-        if (hit && hit.pid) { linked[g] = hit; viaName++; return; }
-        var key = (String(vendor) + "|" + String(byGroup[g][0][nameDisp] || "")).trim().toLowerCase();
-        var cand = (links.byProduct[key] || []).filter(function(l) { return l.pid; });
-        if (cand.length === 1) { linked[g] = cand[0]; viaProduct++; }
+        if (hit && hit.pid) { linked[g] = hit; taken[hit.pid] = true; viaName++; }
+      });
+      groupOrder.forEach(function(g) {
+        if (linked[g]) return;
+        var rec = byGroup[g][0];
+        var key = (String(vendorDisp ? rec[vendorDisp] || "" : "") + "|" + String(rec[nameDisp] || "")).trim().toLowerCase();
+        var cand = (links.byProduct[key] || []).filter(function(l) { return l.pid && !taken[l.pid]; });
+        if (cand.length > 1) cand = vqsBestLinks(cand, rec);
+        if (cand.length === 1) { linked[g] = cand[0]; taken[cand[0].pid] = true; viaProduct++; }
+        else if (cand.length > 1) ambiguous.push(g);
       });
     }
     vqs.skuPass = Object.keys(linked).length > 0;
@@ -2979,12 +3000,15 @@ async function handleInputFile(file) {
     log("ok", "VQS: <strong>" + vqs.rows.length + "</strong> SKU row(s) in <strong>" + groupOrder.length +
       "</strong> product group(s) — file stamp <strong>" + stamp + "</strong>; products are named VQS-" + stamp + "-P…");
     if (vqs.skuPass) {
-      var missing = groupOrder.filter(function(g) { return !linked[g]; });
+      var missing = groupOrder.filter(function(g) { return !linked[g] && ambiguous.indexOf(g) < 0; });
       log("ok", "SKU pass: <strong>" + Object.keys(linked).length + "</strong> product group(s) found in the Syndigo export" +
         (viaProduct ? " (" + viaName + " by name, " + viaProduct + " by vendor + product name)" : "") +
         " — SKUs will link to their generated Product IDs. The product file is not needed again.");
       if (missing.length) log("err", "<strong>" + missing.length + "</strong> product group(s) are not in the export, so their SKUs are left out: " +
         missing.slice(0, 15).map(escHtml).join(", ") + ". Re-export after those products are created.");
+      if (ambiguous.length) log("err", "<strong>" + ambiguous.length + "</strong> product group(s) match more than one exported product " +
+        "with the same vendor, name and values, so their SKUs are left out: " + ambiguous.slice(0, 15).map(escHtml).join(", ") +
+        ". Give those products distinct names or descriptions.");
       if (!allSkus.length) { log("err", "No SKUs to write."); return; }
     } else {
       log("info", "Product pass: Product IDs are left blank for Syndigo to generate. " +
