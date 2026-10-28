@@ -397,8 +397,8 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 const RELATIONSHIP_TYPE = "sku@@Product";
 // Bump on every change that gets pushed. Shown next to the page title so you can confirm
 // at a glance which build the browser is actually running.
-const APP_VERSION = "2.7.3";
-const APP_BUILT   = "2026-10-26";
+const APP_VERSION = "2.7.4";
+const APP_BUILT   = "2026-10-28";
 
 const PROD_TMPL_KEY = "syndigo_prod_tmpl_v2";
 const SKU_TMPL_KEY  = "syndigo_sku_tmpl_v2";
@@ -680,14 +680,43 @@ const DECIMAL_PLACES_DEFAULT = 2;
 // were therefore rounded. Reset at the start of each entity pass.
 var DECIMAL_ROUNDED = {};
 
+// Number values typed with currency or separators ("$1,299.99", "1 299,00 $") and cleaned:
+// column → { count, example }. Reset with DECIMAL_ROUNDED.
+var NUMBER_CLEANED = {};
+
+// The plain number in a typed value, or null when it can't be read with certainty. A comma
+// before exactly three digits groups thousands; before one or two digits it is a decimal comma.
+function cleanNumber(str) {
+  var s = str.replace(/US\$|C\$|CAD|USD|[$€£]/gi, "").replace(/[\s\u00A0\u202F']/g, "");
+  if (/^[+-]?\d{1,3}(,\d{3})+\.\d+$/.test(s)) {
+    s = s.replace(/,/g, "");
+  } else if (/^[+-]?\d{1,3}(\.\d{3})+,\d+$/.test(s)) {
+    s = s.replace(/\./g, "").replace(",", ".");
+  } else if (/^[+-]?\d{1,3}(,\d{3})+$/.test(s)) {
+    s = s.replace(/,/g, "");
+  } else if (/^[+-]?\d+,\d{1,2}$/.test(s)) {
+    s = s.replace(",", ".");
+  }
+  return /^[+-]?\d+(\.\d+)?$/.test(s) ? s : null;
+}
+
 // Category-specific values the register carries for a SKU whose L4 does not bind that
 // attribute: column → { count, example }. Not written, because Syndigo has no slot for them.
 var CSA_SKIPPED = {};
 
 function formatCellValue(raw, col) {
   var str = String(raw).trim();
-  if (!str || !/^[+-]?\d+(\.\d+)?$/.test(str)) return str;   // "0.95 kg", "N/A", "19.5\"" etc.
   var t = String(col && col.dataType || "").trim().toLowerCase();
+  if (str && (t === "decimal" || t === "integer" || t === "int") && !/^[+-]?\d+(\.\d+)?$/.test(str)) {
+    var clean = cleanNumber(str);
+    if (clean !== null) {
+      var ck = (col && col.dispName) || "?";
+      var rec = NUMBER_CLEANED[ck] = NUMBER_CLEANED[ck] || { count: 0, example: str + " → " + clean };
+      rec.count++;
+      str = clean;
+    }
+  }
+  if (!str || !/^[+-]?\d+(\.\d+)?$/.test(str)) return str;   // "0.95 kg", "N/A", "19.5\"" etc.
 
   if (t === "decimal") {
     var places = (col && col.decimals != null) ? col.decimals : DECIMAL_PLACES_DEFAULT;
@@ -711,6 +740,7 @@ function formatCellValue(raw, col) {
 // format its values. Resets the rounding counters for this pass.
 function attachDataTypes(resolvedCols, typeMap, dmdReverse, precisionMap) {
   DECIMAL_ROUNDED = {};
+  NUMBER_CLEANED = {};
   var defaulted = [];
   resolvedCols.forEach(function(col) {
     if (col.isUom) return;
@@ -723,8 +753,15 @@ function attachDataTypes(resolvedCols, typeMap, dmdReverse, precisionMap) {
   return defaulted;
 }
 
-// Report any column where the configured precision actually discarded digits.
+// Report any column whose numbers were cleaned, or where the configured precision actually
+// discarded digits.
 function logDecimalRounding(label) {
+  var cleaned = Object.keys(NUMBER_CLEANED);
+  if (cleaned.length) log("warn", label + ": currency symbols or separators removed from numbers in " +
+    cleaned.map(function(c) {
+      return "<strong>" + escHtml(c) + "</strong> (" + NUMBER_CLEANED[c].count + ", e.g. " +
+        escHtml(NUMBER_CLEANED[c].example) + ")";
+    }).join(", ") + " — check those values before importing.");
   var cols = Object.keys(DECIMAL_ROUNDED);
   if (!cols.length) return;
   log("warn", label + ": rounded to the configured decimal places in " +
