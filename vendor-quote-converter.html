@@ -299,7 +299,7 @@
         <div class="file-status" id="tax-status"></div>
       </div>
       <div class="tmpl-slot">
-        <label>Syndigo Product Export <span style="font-weight:400;font-size:0.85em;color:#888">(optional — links SKUs to their products in Syndigo; for a VQS, the export of its newly created products)</span></label>
+        <label>Syndigo Product Export <span style="font-weight:400;font-size:0.85em;color:#888">(optional — checks new Product Names against the products already in Syndigo; SKUs link to the product with the same name)</span></label>
         <div class="drop-zone" id="export-drop">
           <div class="drop-icon">🔗</div>
           <strong>Syndigo product export.xlsm</strong>
@@ -394,11 +394,10 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 // CONFIG
 // ============================================================
 
-const RELATIONSHIP_TYPE = "sku@@Product";
 // Bump on every change that gets pushed. Shown next to the page title so you can confirm
 // at a glance which build the browser is actually running.
-const APP_VERSION = "2.7.4";
-const APP_BUILT   = "2026-10-28";
+const APP_VERSION = "2.8.1";
+const APP_BUILT   = "2026-11-05";
 
 const PROD_TMPL_KEY = "syndigo_prod_tmpl_v2";
 const SKU_TMPL_KEY  = "syndigo_sku_tmpl_v2";
@@ -1205,39 +1204,28 @@ function detectQuoteSheet(wb) {
   return { name: wb.SheetNames[0], format: "General" };
 }
 
-// Build BBB Product ID → Syndigo UUID map from a product export's Entities sheet.
-function buildUuidMap(wb) {
-  var ws = wb.Sheets["Entities"];
-  if (!ws) throw new Error("No Entities sheet in export");
-  var rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
-  if (rows.length < 1) throw new Error("Entities sheet is empty");
-  var uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  var uuidIdx = -1, pidIdx = -1, dataStart = 0;
-  // Try header row first (scan first 5 rows for "ID" column label)
-  for (var r = 0; r < Math.min(5, rows.length); r++) {
-    var cands = (rows[r] || []).map(function(h) { return String(h).trim(); });
-    var ui = cands.indexOf("ID");
-    if (ui >= 0) {
-      var pi = cands.indexOf("Product ID");
-      if (pi < 0) pi = cands.indexOf("Name");
-      if (pi >= 0) { uuidIdx = ui; pidIdx = pi; dataStart = r + 1; break; }
-    }
+// Product Names already used in Syndigo, from a product export's Entities sheet:
+// lower-cased name → Product IDs. The SKU-to-product graph errors when a name matches twice.
+function buildExportNames(wb) {
+  var rows = sheetRowsFromA1(wb, "Entities");
+  var hi = -1;
+  for (var r = 0; r < Math.min(6, rows.length); r++) {
+    var cand = (rows[r] || []).map(function(h) { return String(h).replace(/\/\/en-US$/, "").trim(); });
+    if (cand.indexOf("Type") >= 0 && cand.indexOf("Product Name") >= 0) { hi = r; break; }
   }
-  // Fallback: headerless export — find UUID column by pattern in first row
-  if (uuidIdx < 0) {
-    var first = (rows[0] || []).map(function(c) { return String(c).trim(); });
-    for (var c = 0; c < first.length; c++) {
-      if (uuidRe.test(first[c])) { uuidIdx = c; pidIdx = c + 1; dataStart = 0; break; }
-    }
+  if (hi < 0) throw new Error("no Type / Product Name header in the Entities sheet — is this a Syndigo product export?");
+  var h = rows[hi].map(function(x) { return String(x).replace(/\/\/en-US$/, "").trim(); });
+  var ti = h.indexOf("Type"), ni = h.indexOf("Product Name"), pi = h.indexOf("Product ID");
+  var names = {}, count = 0;
+  for (var i = hi + 1; i < rows.length; i++) {
+    var row = rows[i];
+    if (String(row[ti] || "").trim() !== "product") continue;
+    var name = String(row[ni] || "").trim().toLowerCase();
+    if (!name) continue;
+    (names[name] = names[name] || []).push(pi >= 0 ? String(row[pi] || "").trim() : "");
+    count++;
   }
-  if (uuidIdx < 0) throw new Error("Export: could not find UUID column — is this a Syndigo product export?");
-  var map = {};
-  for (var i = dataStart; i < rows.length; i++) {
-    var uuid = String(rows[i][uuidIdx] || "").trim();
-    var pid  = String(rows[i][pidIdx]  || "").trim();
-    if (uuidRe.test(uuid) && pid && !map[pid]) map[pid] = uuid;
-  }
-  return map;
+  return { names: names, count: count };
 }
 
 function parseQuoteSheet(wb) {
@@ -1286,9 +1274,9 @@ function groupSKUsIntoProducts(skus) {
 // its data when a column is cut, moved or inserted. A header is the attribute's display name in
 // the models, a VQS label from VQS_LABELS, or either with " — L / W / H / unit / French".
 // How each attribute is treated comes from those suffixes and the loaded models.
-// "Matrix" maps each L1|L2|L3|L4 choice to its taxonomy node. IDs are never written: Syndigo
-// generates Product and SKU IDs. Products go in first, named VQS-<stamp>-<group>; the SKU pass
-// finds them by that Name in a product export and links each SKU to the generated Product ID.
+// "Matrix" maps each L1|L2|L3|L4 choice to its taxonomy node. ID, Name, Product ID and SKU ID
+// are left blank for Syndigo to fill. Both files come from one pass, and a Syndigo graph links
+// each SKU to the product with its Product Name.
 
 var VQS_HEADER_ROW = 3;  // 0-based: headers on row 4
 var VQS_FIRST_ROW = 4;   // 0-based: data starts on row 5
@@ -1319,7 +1307,7 @@ function sheetRowsFromA1(wb, name) {
   return rows;
 }
 
-// Same vendor and products give the same stamp, so the SKU pass can recompute it.
+// Same vendor and products give the same stamp, so a re-run names the output files the same way.
 function vqsStamp(vendor, groupKeys) {
   var text = String(vendor || "") + "|" + groupKeys.slice().sort().join("|");
   var h = 0x811c9dc5;
@@ -1437,43 +1425,6 @@ function parseVqs(wb, dmdMap, model) {
   return { rows: rows, headers: Object.keys(headers), issues: issues };
 }
 
-// Product export rows keyed by entity Name, plus Vendor + Product Name as a fallback.
-function buildVqsLinkMap(wb) {
-  var rows = sheetRowsFromA1(wb, "Entities");
-  var hi = -1;
-  for (var r = 0; r < Math.min(6, rows.length); r++) {
-    var cand = (rows[r] || []).map(function(h) { return String(h).replace(/\/\/en-US$/, "").trim(); });
-    if (cand.indexOf("ID") >= 0 && cand.indexOf("Name") >= 0) { hi = r; break; }
-  }
-  if (hi < 0) throw new Error("no ID / Name header in the export's Entities sheet");
-  var h = rows[hi].map(function(x) { return String(x).replace(/\/\/en-US$/, "").trim(); });
-  var ix = function(n) { return h.indexOf(n); };
-  var byName = {}, byProduct = {};
-  for (var i = hi + 1; i < rows.length; i++) {
-    var row = rows[i];
-    if (String(row[ix("Type")] || "").trim() !== "product") continue;
-    var link = { uuid: String(row[ix("ID")] || "").trim(), pid: String(row[ix("Product ID")] || "").trim(),
-                 name: String(row[ix("Name")] || "").trim(), values: {} };
-    h.forEach(function(n, c) { if (n && row[c] !== "" && row[c] != null) link.values[n] = row[c]; });
-    if (link.name) byName[link.name] = link;
-    var key = (String(row[ix("Vendor")] || "") + "|" + String(row[ix("Product Name")] || "")).trim().toLowerCase();
-    (byProduct[key] = byProduct[key] || []).push(link);
-  }
-  return { byName: byName, byProduct: byProduct };
-}
-
-// Export rows that share the most attribute values with a VQS product row (ties are all returned).
-function vqsBestLinks(cand, rec) {
-  var norm = function(v) { return String(v == null ? "" : v).trim().toLowerCase(); };
-  var best = [], top = -1;
-  cand.forEach(function(l) {
-    var score = 0;
-    for (var n in l.values) if (norm(rec[n]) && norm(rec[n]) === norm(l.values[n])) score++;
-    if (score > top) { top = score; best = [l]; } else if (score === top) best.push(l);
-  });
-  return best;
-}
-
 // ============================================================
 // ROW BUILDERS  (return {colIndex: value})
 // ============================================================
@@ -1481,7 +1432,7 @@ function vqsBestLinks(cand, rec) {
 function buildProductRow(product, resolvedCols, prodIdCi, prodTypeCi, prodNameCi) {
   var cells = {};
   if (prodTypeCi !== undefined)                       cells[prodTypeCi] = "product";
-  var prodName = product._entityName || product._productId;
+  var prodName = product._productId;
   if (prodNameCi !== undefined && prodName)           cells[prodNameCi] = String(prodName);
   if (prodIdCi   !== undefined && product._productId) cells[prodIdCi]   = String(product._productId);
   for (var i = 0; i < resolvedCols.length; i++) {
@@ -1498,11 +1449,10 @@ function buildProductRow(product, resolvedCols, prodIdCi, prodTypeCi, prodNameCi
   return cells;
 }
 
-function buildSKURow(sku, resolvedCols, skuIdCi, skuProdIdCi, skuTypeCi, skuNameCi, skuSeqCi, seqNum) {
+function buildSKURow(sku, resolvedCols, skuIdCi, skuProdIdCi, skuTypeCi, skuNameCi) {
   var cells = {};
-  if (skuSeqCi !== undefined) cells[skuSeqCi] = String(seqNum);
   if (skuTypeCi   !== undefined)                    cells[skuTypeCi]   = "sku";
-  var skuName = sku._entityName || sku._productId;
+  var skuName = sku._productId;
   if (skuNameCi   !== undefined && skuName)         cells[skuNameCi]   = String(skuName);
   if (skuIdCi     !== undefined && sku._skuId)      cells[skuIdCi]     = String(sku._skuId);
   if (skuProdIdCi !== undefined && sku._productId)  cells[skuProdIdCi] = String(sku._productId);
@@ -1526,24 +1476,6 @@ function buildSKURow(sku, resolvedCols, skuIdCi, skuProdIdCi, skuTypeCi, skuName
     }
   }
   return cells;
-}
-
-function buildRelRows(relColMap, skus) {
-  var relIdCi = relColMap["ID"];
-  return skus.map(function(s, idx) {
-    var cells = {};
-    if (relIdCi !== undefined) cells[relIdCi] = String(idx + 1);
-    var data = {
-      "Type":            RELATIONSHIP_TYPE,
-      "Related to Type": "product",
-      "Product ID":      String(s._productId || ""),
-    };
-    for (var colName in data) {
-      var ci = relColMap[colName];
-      if (ci !== undefined && data[colName]) cells[ci] = data[colName];
-    }
-    return cells;
-  });
 }
 
 // ============================================================
@@ -1583,6 +1515,94 @@ async function findSheetPath(zip, sheetName) {
   var relM = wbRels.match(new RegExp('<Relationship\\b[^>]*Id="' + rid + '"[^>]*Target="([^"]+)"'));
   if (!relM) return null;
   return relM[1]; // e.g. "worksheets/sheet3.xml"
+}
+
+// Take a sheet out of the workbook: its tab, the names that point at it, its part and the
+// comment/drawing parts only it uses, and its entries in the content types and app properties.
+async function removeSheet(zip, sheetName) {
+  var target = await findSheetPath(zip, sheetName);
+  if (!target) return false;
+  var esc = function(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); };
+  var wbXml = await zip.file("xl/workbook.xml").async("string");
+  var sheets = wbXml.match(/<sheet\b[^>]*\/?>/g) || [];
+  var idx = -1;
+  sheets.forEach(function(s, i) { if (s.indexOf('name="' + sheetName + '"') >= 0) idx = i; });
+  var rid = sheets[idx].match(/r:id="([^"]+)"/)[1];
+
+  var nameRef = new RegExp("(^|[^A-Za-z0-9_.])'?" + esc(sheetName) + "'?!");
+  var dropped = [];
+  wbXml = wbXml.replace(sheets[idx], "");
+  wbXml = wbXml.replace(/<definedName\b([^>]*)>([^<]*)<\/definedName>/g, function(all, attrs, ref) {
+    var loc = attrs.match(/localSheetId="(\d+)"/);
+    if (nameRef.test(ref) || (loc && +loc[1] === idx)) {
+      dropped.push((attrs.match(/name="([^"]+)"/) || [])[1]);
+      return "";
+    }
+    if (loc && +loc[1] > idx) return all.replace(loc[0], 'localSheetId="' + (+loc[1] - 1) + '"');
+    return all;
+  });
+  wbXml = wbXml.replace(/<definedNames>\s*<\/definedNames>/, "");
+  wbXml = wbXml.replace(/\b(activeTab|firstSheet)="(\d+)"/g, function(all, k, v) {
+    return +v > idx ? k + '="' + (+v - 1) + '"' : +v === idx ? k + '="0"' : all;
+  });
+  zip.file("xl/workbook.xml", wbXml);
+
+  var relsXml = await zip.file("xl/_rels/workbook.xml.rels").async("string");
+  zip.file("xl/_rels/workbook.xml.rels",
+    relsXml.replace(new RegExp('<Relationship\\b[^>]*Id="' + esc(rid) + '"[^>]*/>'), ""));
+
+  // Parts the sheet's own .rels points at (comments, VML), unless another part uses them too.
+  var sheetPath = "xl/" + target.replace(/^\/?xl\//, "");
+  var dir = sheetPath.replace(/[^/]+$/, "");
+  var sheetRelsPath = dir + "_rels/" + sheetPath.split("/").pop() + ".rels";
+  var gone = [sheetPath];
+  var sheetRels = zip.file(sheetRelsPath);
+  if (sheetRels) {
+    var srXml = await sheetRels.async("string");
+    gone.push(sheetRelsPath);
+    var others = Object.keys(zip.files).filter(function(p) { return /\.rels$/.test(p) && p !== sheetRelsPath; });
+    var otherXml = (await Promise.all(others.map(function(p) { return zip.file(p).async("string"); }))).join("");
+    (srXml.match(/Target="[^"]+"/g) || []).forEach(function(t) {
+      var rel = t.slice(8, -1);
+      if (/^[a-z]+:/i.test(rel)) return;
+      var parts = (dir + rel).split("/"), out = [];
+      parts.forEach(function(p) { if (p === "..") out.pop(); else if (p !== ".") out.push(p); });
+      var full = out.join("/");
+      if (!new RegExp('["/]' + esc(full.split("/").pop()) + '"').test(otherXml)) gone.push(full);
+    });
+  }
+  gone.forEach(function(p) { zip.remove(p); });
+
+  var ctFile = zip.file("[Content_Types].xml");
+  if (ctFile) {
+    var ct = await ctFile.async("string");
+    gone.forEach(function(p) {
+      ct = ct.replace(new RegExp('<Override\\b[^>]*PartName="/' + esc(p) + '"[^>]*/>'), "");
+    });
+    zip.file("[Content_Types].xml", ct);
+  }
+
+  var appFile = zip.file("docProps/app.xml");
+  if (appFile) {
+    var app = await appFile.async("string");
+    var titles = [sheetName].concat(dropped), removed = { sheets: 0, names: 0 };
+    app = app.replace(/(<TitlesOfParts>[\s\S]*?<\/TitlesOfParts>)/, function(block) {
+      titles.forEach(function(t, i) {
+        var re = new RegExp("<vt:lpstr>" + esc(t) + "</vt:lpstr>");
+        if (re.test(block)) { block = block.replace(re, ""); removed[i ? "names" : "sheets"]++; }
+      });
+      return block.replace(/(<vt:vector size=")(\d+)/, function(a, p, n) { return p + (+n - removed.sheets - removed.names); });
+    });
+    var bump = function(label, n) {
+      if (!n) return;
+      app = app.replace(new RegExp("(<vt:lpstr>" + label + "</vt:lpstr></vt:variant><vt:variant><vt:i4>)(\\d+)"),
+        function(a, p, v) { return p + (+v - n); });
+    };
+    bump("Worksheets", removed.sheets);
+    bump("Named Ranges", removed.names);
+    zip.file("docProps/app.xml", app);
+  }
+  return true;
 }
 
 // Replace data rows (row 3+) in a worksheet XML string.
@@ -2493,7 +2513,7 @@ function addAppendedColDefs(xml, cols, origXml, styleBook) {
                : xml.replace(/<sheetData\b/, colsXml + "<sheetData");
 }
 
-async function buildOutputBuffer(templateBuf, entityRows, relRows, appendedEntityCols, l4Paths) {
+async function buildOutputBuffer(templateBuf, entityRows, appendedEntityCols, l4Paths) {
   var zip = await JSZip.loadAsync(templateBuf);
 
   var entitiesPath = await findSheetPath(zip, "Entities");
@@ -2630,16 +2650,8 @@ async function buildOutputBuffer(templateBuf, entityRows, relRows, appendedEntit
     await updateRelatedTables(zip, entitiesPath, insertionRecords, colsForXml);
   }
 
-  if (relRows) {
-    var relsPath = await findSheetPath(zip, "Relationships");
-    if (relsPath) {
-      var fullRelsPath = "xl/" + relsPath;
-      var rXml = await zip.file(fullRelsPath).async("string");
-      rXml = replaceDataRowsXml(rXml, relRows, []);
-      rXml = updateSheetDimension(rXml, -1, lastNonEmptyRow(relRows));
-      zip.file(fullRelsPath, rXml);
-    }
-  }
+  // A Syndigo graph links SKUs to products by Product Name, so the import carries no relationships.
+  await removeSheet(zip, "Relationships");
 
   if (l4Paths && l4Paths.length) {
     await updateRefDataTaxPaths(zip, l4Paths);
@@ -2661,7 +2673,7 @@ function downloadBuf(buf, filename) {
 
 var state = {
   productRows: null, prodTemplateBuf: null, l4Paths: null,
-  skuRows: null, skuRelRows: null, skuTemplateBuf: null
+  skuRows: null, skuTemplateBuf: null
 };
 
 // type: "warn"/"err" need a decision, "ok" is the headline result, "info" is commentary.
@@ -2753,10 +2765,9 @@ function showTemplateCached(key, label, statusId, dropId) {
       badge = n ? (n + " categories cached") : "loaded (no productTaxonomy categories)";
     } else if (key === EXPORT_KEY) {
       if (!wb.Sheets["Entities"]) throw new Error("missing Entities sheet — is this a Syndigo product export?");
-      var uuidMap = buildUuidMap(wb);
-      n = Object.keys(uuidMap).length;
-      if (!n) throw new Error("No UUID→Product ID mappings found in export");
-      badge = n + " product UUID(s) cached";
+      n = buildExportNames(wb).count;
+      if (!n) throw new Error("No product names found in export");
+      badge = n + " product name(s) cached";
     } else {
       if (!wb.Sheets["Entities"]) throw new Error("no Entities sheet");
       var map = buildColMap(wb, "Entities");
@@ -2809,8 +2820,7 @@ async function handleTemplateFile(file, key, label, statusId, dropId) {
       if (!wb.Sheets["CATEGORIES"]) throw new Error("No CATEGORIES sheet — is this the taxonomy model export?");
     } else if (key === EXPORT_KEY) {
       if (!wb.Sheets["Entities"]) throw new Error("No 'Entities' sheet — is this a Syndigo product export?");
-      var uuidCheck = buildUuidMap(wb);
-      if (!Object.keys(uuidCheck).length) throw new Error("No UUID→Product ID mappings found — check this is a Syndigo product export.");
+      if (!buildExportNames(wb).count) throw new Error("No product names found — check this is a Syndigo product export.");
     } else {
       if (!wb.Sheets["Entities"]) throw new Error("No 'Entities' sheet — is this a Syndigo import template?");
       if (!Object.keys(buildColMap(wb, "Entities")).length)
@@ -2835,7 +2845,7 @@ async function handleInputFile(file) {
   document.getElementById("btn-dl-products").disabled = true;
   document.getElementById("btn-dl-skus").disabled     = true;
   state.productRows = null; state.prodTemplateBuf = null; state.l4Paths = null;
-  state.skuRows = null; state.skuRelRows = null; state.skuTemplateBuf = null;
+  state.skuRows = null; state.skuTemplateBuf = null;
 
   var prodBuf = loadTemplateBuffer(PROD_TMPL_KEY);
   var skuBuf  = loadTemplateBuffer(SKU_TMPL_KEY);
@@ -2993,65 +3003,67 @@ async function handleInputFile(file) {
     var stamp = vqsStamp(vendor, groupOrder.map(function(g) { return g + "=" + (byGroup[g][0][nameDisp] || ""); }));
     vqs.stamp = stamp;
 
-    // A product export that contains this VQS's products switches to the SKU pass.
-    var links = null;
-    var expBuf = loadTemplateBuffer(EXPORT_KEY);
-    if (expBuf) {
-      try { links = buildVqsLinkMap(XLSX.read(expBuf, { type: "array" })); }
-      catch(e) { log("warn", "Syndigo product export could not be read for VQS links: " + escHtml(e.message)); }
-    }
-    // Syndigo's create rule overwrites Name with the Product ID, so most links come from each
-    // group's own Vendor + Product Name; same-name products are told apart by their other values.
-    var linked = {}, viaName = 0, viaProduct = 0, taken = {}, ambiguous = [];
-    if (links) {
-      groupOrder.forEach(function(g) {
-        var hit = links.byName["VQS-" + stamp + "-" + g];
-        if (hit && hit.pid) { linked[g] = hit; taken[hit.pid] = true; viaName++; }
-      });
-      groupOrder.forEach(function(g) {
-        if (linked[g]) return;
-        var rec = byGroup[g][0];
-        var key = (String(vendorDisp ? rec[vendorDisp] || "" : "") + "|" + String(rec[nameDisp] || "")).trim().toLowerCase();
-        var cand = (links.byProduct[key] || []).filter(function(l) { return l.pid && !taken[l.pid]; });
-        if (cand.length > 1) cand = vqsBestLinks(cand, rec);
-        if (cand.length === 1) { linked[g] = cand[0]; taken[cand[0].pid] = true; viaProduct++; }
-        else if (cand.length > 1) ambiguous.push(g);
-      });
-    }
-    vqs.skuPass = Object.keys(linked).length > 0;
+    // SKUs link to their product through a Syndigo graph that matches Product Name, so every
+    // group needs a name of its own; a name used twice links nothing.
+    var nameOf = {}, groupsByName = {}, noName = [], dupName = [], renamed = 0;
+    groupOrder.forEach(function(g) {
+      var n = String(byGroup[g][0][nameDisp] || "").trim();
+      nameOf[g] = n;
+      if (!n) { noName.push(g); return; }
+      (groupsByName[n.toLowerCase()] = groupsByName[n.toLowerCase()] || []).push(g);
+    });
+    Object.keys(groupsByName).forEach(function(k) {
+      if (groupsByName[k].length > 1) dupName.push(groupsByName[k]);
+    });
+    var leftOut = {};
+    noName.forEach(function(g) { leftOut[g] = true; });
+    dupName.forEach(function(gs) { gs.forEach(function(g) { leftOut[g] = true; }); });
 
     groupOrder.forEach(function(g) {
+      if (leftOut[g]) return;
       var first = byGroup[g][0], p = {};
       for (var k in first) p[k] = first[k];
-      p._entityName = "VQS-" + stamp + "-" + g;
-      p._productId = vqs.skuPass && linked[g] ? linked[g].pid : "";
+      p._productId = "";
       products.push(p);
-      byGroup[g].forEach(function(rec, i) {
+      byGroup[g].forEach(function(rec) {
+        if (rec[nameDisp] !== first[nameDisp]) renamed++;
+        rec[nameDisp] = first[nameDisp];
         rec._skuId = "";
-        rec._productId = p._productId;
-        rec._entityName = p._entityName + "-" + ("0" + (i + 1)).slice(-2);
-        if (!vqs.skuPass || linked[g]) allSkus.push(rec);
+        rec._productId = "";
+        allSkus.push(rec);
       });
     });
     inputHeaders = vqs.headers;
     log("ok", "VQS: <strong>" + vqs.rows.length + "</strong> SKU row(s) in <strong>" + groupOrder.length +
-      "</strong> product group(s) — file stamp <strong>" + stamp + "</strong>; products are named VQS-" + stamp + "-P…");
-    if (vqs.skuPass) {
-      var missing = groupOrder.filter(function(g) { return !linked[g] && ambiguous.indexOf(g) < 0; });
-      log("ok", "SKU pass: <strong>" + Object.keys(linked).length + "</strong> product group(s) found in the Syndigo export" +
-        (viaProduct ? " (" + viaName + " by name, " + viaProduct + " by vendor + product name)" : "") +
-        " — SKUs will link to their generated Product IDs. The product file is not needed again.");
-      if (missing.length) log("err", "<strong>" + missing.length + "</strong> product group(s) are not in the export, so their SKUs are left out: " +
-        missing.slice(0, 15).map(escHtml).join(", ") + ". Re-export after those products are created.");
-      if (ambiguous.length) log("err", "<strong>" + ambiguous.length + "</strong> product group(s) match more than one exported product " +
-        "with the same vendor, name and values, so their SKUs are left out: " + ambiguous.slice(0, 15).map(escHtml).join(", ") +
-        ". Give those products distinct names or descriptions.");
-      if (!allSkus.length) { log("err", "No SKUs to write."); return; }
-    } else {
-      log("info", "Product pass: Product IDs are left blank for Syndigo to generate. " +
-        "Next: import the product file, export those products from Syndigo, load the export in Step 1 " +
-        "(Syndigo Product Export), then drop this VQS again for the SKU file.");
+      "</strong> product group(s) — file stamp <strong>" + stamp + "</strong>; ID, Name, Product ID and SKU ID are left blank for Syndigo");
+    if (noName.length) log("err", "<strong>" + noName.length + "</strong> product group(s) have no Product Name, so their SKUs " +
+      "could not link and the group is left out: " + noName.slice(0, 15).map(escHtml).join(", "));
+    if (dupName.length) log("err", "<strong>" + dupName.length + "</strong> Product Name(s) are used by more than one product group, " +
+      "so Syndigo could not tell which product their SKUs belong to; those groups are left out: " +
+      dupName.slice(0, 10).map(function(gs) {
+        return "&ldquo;" + escHtml(nameOf[gs[0]]) + "&rdquo; (" + gs.map(escHtml).join(", ") + ")";
+      }).join("; ") + ". Give each product its own name.");
+    if (renamed) log("warn", "<strong>" + renamed + "</strong> SKU row(s) had a Product Name different from the first row of their group; " +
+      "they take the group's name so they link to that product.");
+
+    var expBuf = loadTemplateBuffer(EXPORT_KEY);
+    if (expBuf) {
+      try {
+        var existing = buildExportNames(XLSX.read(expBuf, { type: "array" }));
+        var taken = products.filter(function(p) { return existing.names[String(p[nameDisp]).trim().toLowerCase()]; });
+        log(taken.length ? "err" : "ok", taken.length
+          ? "<strong>" + taken.length + "</strong> Product Name(s) already exist in the Syndigo export, so their SKUs would match " +
+            "two products and link to neither: " + taken.slice(0, 10).map(function(p) {
+              var ids = existing.names[String(p[nameDisp]).trim().toLowerCase()].filter(Boolean);
+              return "&ldquo;" + escHtml(p[nameDisp]) + "&rdquo;" + (ids.length ? " (Product ID " + ids.map(escHtml).join(", ") + ")" : "");
+            }).join(", ") + (taken.length > 10 ? ", and " + (taken.length - 10) + " more" : "") +
+            ". Rename them before importing, unless the export already holds this VQS's own products."
+          : "Product Names: none of the " + products.length + " are used by the " + existing.count + " products in the Syndigo export.");
+      } catch(e) { log("warn", "Syndigo product export could not be read for the Product Name check: " + escHtml(e.message)); }
     }
+    if (!products.length) { log("err", "No products to write."); return; }
+    log("info", "Import the product file first. Once Syndigo has created the products, import the SKU file: " +
+      "each SKU links to the product with the same Product Name, and Syndigo fills in the IDs.");
   }
 
   // Taxonomy paths — L4 names become full paths, and each SKU learns which category-specific
@@ -3199,35 +3211,15 @@ async function handleInputFile(file) {
     logDecimalRounding("Product");
     state.prodTemplateBuf = prodBuf;
 
-    // Product UUIDs from a Syndigo export (optional — fills Related to ID on the SKU Relationships sheet)
-    var exportBuf = loadTemplateBuffer(EXPORT_KEY);
-    var uuidMap = {};
-    if (exportBuf) {
-      try {
-        var exportWb = XLSX.read(exportBuf, { type: "array" });
-        uuidMap = buildUuidMap(exportWb);
-        log("info", "Syndigo export: <strong>" + Object.keys(uuidMap).length + "</strong> UUID(s) loaded");
-      } catch(e) {
-        log("warn", "Syndigo export parse error: " + escHtml(e.message) + " — UUIDs skipped");
-      }
-    }
-
     log("ok", "Products: <strong>" + products.length + "</strong> rows ready");
   } catch(e) { log("err", "Product build failed: " + escHtml(e.message)); console.error(e); return; }
 
   state.fileTag = vqsFlow ? "VQS-" + vqs.stamp + "_" : "";
-  if (vqsFlow && !vqs.skuPass) {
-    document.getElementById("btn-dl-products").disabled = false;
-    setStatus("input-status", "ok", "&#x2713; " + escHtml(file.name) + " — " + products.length +
-      " products ready (SKU file comes after the products are in Syndigo)");
-    return;
-  }
 
   // ── SKU ──────────────────────────────────────────────────────
   try {
     var skuWb  = XLSX.read(skuBuf,  { type: "array" });
     var skuMap = buildColMap(skuWb,  "Entities");
-    var relMap = buildColMap(skuWb,  "Relationships");
 
     // Register headers map to attributes by exact DMD display name.
     var autoSku         = autoMatchHeaders(inputHeaders, skuMap, dmdReverse);
@@ -3288,9 +3280,8 @@ async function handleInputFile(file) {
       (appendedSkuCols.length ? " (<strong>" + appendedSkuCols.length + "</strong> appended)" : "") +
       " — SKU ID ci=" + skuIdCi + ", Product ID ci=" + skuProdIdCi);
 
-    var skuSeqCi = skuMap["ID"];
     CSA_SKIPPED = {};
-    state.skuRows = allSkus.map(function(s, idx) { return buildSKURow(s, resolvedSkuCols, skuIdCi, skuProdIdCi, skuTypeCi, skuNameCi, skuSeqCi, idx + 1); });
+    state.skuRows = allSkus.map(function(s) { return buildSKURow(s, resolvedSkuCols, skuIdCi, skuProdIdCi, skuTypeCi, skuNameCi); });
     var skippedCols = Object.keys(CSA_SKIPPED);
     if (skippedCols.length) {
       var skippedTotal = skippedCols.reduce(function(a, k) { return a + CSA_SKIPPED[k].count; }, 0);
@@ -3323,28 +3314,23 @@ async function handleInputFile(file) {
 
     state.skuTemplateBuf = skuBuf;
 
-    state.skuRelRows = allSkus.map(function(s, idx) {
-      var relRow = {};
-      var seqNum    = String(idx + 1);
-      var productId = String(s._productId || "");
-      var productUuid = uuidMap[productId] || "";
-      if (relMap["Type"]            !== undefined) relRow[relMap["Type"]]            = "sku@@Product";
-      if (relMap["ID"]              !== undefined) relRow[relMap["ID"]]              = seqNum;
-      if (relMap["Name"]            !== undefined) relRow[relMap["Name"]]            = productId;
-      if (relMap["Related to Type"] !== undefined) relRow[relMap["Related to Type"]] = "product";
-      if (relMap["Product ID"]      !== undefined) relRow[relMap["Product ID"]]      = productId;
-      if (relMap["Related to ID"]   !== undefined && productUuid) relRow[relMap["Related to ID"]] = productUuid;
-      return relRow;
-    });
+    // No Relationships rows: a Syndigo graph links each SKU to the product with its Product Name.
+    var skuNameDisp = dmdMap["thgproductname"];
+    var skuNameCol = resolvedSkuCols.filter(function(c) { return c.dispName === skuNameDisp; })[0];
+    if (!skuNameCol) {
+      log("err", "The SKU file has no <strong>" + escHtml(skuNameDisp || "Product Name") + "</strong> column, so its SKUs cannot " +
+        "link to their products. Load a SKU template that has it, or check that the input file carries Product Name.");
+    } else {
+      var unnamedSkus = allSkus.filter(function(s) { return !String(s[skuNameCol.src] || "").trim(); }).length;
+      if (unnamedSkus) log("warn", "<strong>" + unnamedSkus + "</strong> SKU(s) have no Product Name, so they will not link to a product.");
+    }
     log("ok", "SKUs: <strong>" + allSkus.length + "</strong> rows ready");
   } catch(e) { log("err", "SKU build failed: " + escHtml(e.message)); console.error(e); return; }
 
-  // A VQS SKU pass must not offer the product file again: it would create the products twice.
-  document.getElementById("btn-dl-products").disabled = vqsFlow;
+  document.getElementById("btn-dl-products").disabled = false;
   document.getElementById("btn-dl-skus").disabled     = false;
   setStatus("input-status", "ok", "&#x2713; " + escHtml(file.name) + " — " +
-    (vqsFlow ? allSkus.length + " SKUs ready, linked to " + products.filter(function(p) { return p._productId; }).length + " products"
-             : products.length + " products, " + allSkus.length + " SKUs ready"));
+    products.length + " products, " + allSkus.length + " SKUs ready" + (vqsFlow ? " (import products first)" : ""));
 }
 
 // ============================================================
@@ -3356,7 +3342,7 @@ document.getElementById("btn-dl-products").addEventListener("click", async funct
   this.disabled = true;
   this.textContent = "Building…";
   try {
-    var buf = await buildOutputBuffer(state.prodTemplateBuf, state.productRows, null, state.appendedProdCols || [], state.l4Paths || null);
+    var buf = await buildOutputBuffer(state.prodTemplateBuf, state.productRows, state.appendedProdCols || [], state.l4Paths || null);
     var ts = new Date().toISOString().replace(/[-:]/g, "").replace("T", "_").slice(0, 15);
     downloadBuf(buf, "Syndigo_Product_Import_" + (state.fileTag || "") + ts + ".xlsm");
   } catch(e) {
@@ -3372,7 +3358,7 @@ document.getElementById("btn-dl-skus").addEventListener("click", async function(
   this.disabled = true;
   this.textContent = "Building…";
   try {
-    var buf = await buildOutputBuffer(state.skuTemplateBuf, state.skuRows, state.skuRelRows, state.appendedSkuCols || []);
+    var buf = await buildOutputBuffer(state.skuTemplateBuf, state.skuRows, state.appendedSkuCols || []);
     var ts = new Date().toISOString().replace(/[-:]/g, "").replace("T", "_").slice(0, 15);
     downloadBuf(buf, "Syndigo_SKU_Import_" + (state.fileTag || "") + ts + ".xlsm");
   } catch(e) {
