@@ -264,7 +264,7 @@
 
 <div class="page-header">
   <h1>Vendor Quote &rarr; Syndigo Converter <span class="version-badge" id="version-badge"></span></h1>
-  <p>Converts vendor quote sheets or the Master SKU Register into Syndigo entity import files.</p>
+  <p>Converts a vendor quote sheet (VQS) into Syndigo product and SKU import files.</p>
 </div>
 
 <!-- STEP 1: Data model -->
@@ -334,7 +334,7 @@
   <div class="card-body">
     <div class="drop-zone-lg" id="input-drop">
       <div class="drop-icon">📂</div>
-      <strong>Drop your file here</strong>
+      <strong>Drop your VQS here</strong>
       Click to browse &mdash; or drag &amp; drop
     </div>
     <input type="file" id="input-file-input" accept=".xlsx,.xlsm,.xls">
@@ -566,7 +566,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     return bound;
   }
 
-  // opts: { l4Paths: [...], include: optional array/set of attribute names (cross-referenced from the register) }
+  // opts: { l4Paths: [...], include: optional array/set of attribute names (the columns the input supplies) }
   function planColumns(model, entity, opts) {
     opts = opts || {};
     var A = model.attrs, ident = IDENT[entity], ear = model.entities[entity] || {}, locales = opts.locales || model.locales;
@@ -956,7 +956,7 @@ var SKELETON_B64 = "UEsDBBQAAAAIAAAAAADScKD32wEAAJ8LAAATAAAAW0NvbnRlbnRfVHlwZXNd
 
 // Bump on every change that gets pushed. Shown next to the page title so you can confirm
 // at a glance which build the browser is actually running.
-const APP_VERSION = "2.9.2";
+const APP_VERSION = "2.10.0";
 const APP_BUILT   = "2026-11-17";
 
 const PROD_TMPL_KEY = "syndigo_prod_tmpl_v2";
@@ -975,14 +975,7 @@ const DEV_KEY       = "vqc_dev_enabled";
 const MODEL_DB      = "vqc-model-cache";
 const MODEL_CACHE_VERSION = 1;
 
-// Register bookkeeping columns. Present to help users navigate the register; they have no
-// counterpart in the data model and are deliberately not mapped.
-const REGISTER_IGNORE = [
-  "Group Key", "Locked?", "BBB Product ID", "BBB SKU ID", "Prefix", "Status", "Row #",
-  "BB&B SKU #", "Date Issued", "Issued By", "Sub-Category"
-];
-
-// SKU-level identifiers that must not be written at product level. The register carries
+// SKU-level identifiers that must not be written at product level. The VQS carries
 // these per SKU and a product record is a copy of its first SKU row, so populating them at
 // product level publishes one arbitrary variant's identifier — 735 of 2974 products have
 // SKUs that disagree on Item / Model. The template columns stay; they are just left empty.
@@ -993,26 +986,16 @@ function isExcludedAtProduct(col, dmdReverse) {
   return !!thg && PRODUCT_EXCLUDED_ATTRS.indexOf(thg) >= 0;
 }
 
-// The register's L4 column has been called both "L4 Product Type" (older registers) and
-// "L4 Hierarchy Node" (its DMD display name). Taxonomy path resolution and the category-specific
-// attribute check read it by header name, so accept either — renaming it must not silently disable them.
-const L4_REGISTER_HEADERS = ["L4 Hierarchy Node", "L4 Product Type"];
+// The VQS reader stores each row's L4 under this header; taxonomy paths and the
+// category-specific attribute check read it from there.
+const L4_HEADER = "L4 Hierarchy Node";
 
-function l4HeaderOf(row) {
-  for (var i = 0; i < L4_REGISTER_HEADERS.length; i++) {
-    if (row[L4_REGISTER_HEADERS[i]] !== undefined) return L4_REGISTER_HEADERS[i];
-  }
-  return null;
-}
+function l4HeaderOf(row) { return row[L4_HEADER] !== undefined ? L4_HEADER : null; }
 
 function l4ValueOf(row) {
   var h = l4HeaderOf(row);
   return h ? String(row[h] || "").trim() : "";
 }
-
-// Matching attribute thg keys (register flow only)
-const THG_PRODUCT_ID = "thgproductid";
-const THG_SKU_ID     = "thgskuid";
 
 // ============================================================
 // TEMPLATE BUFFER CACHE  (localStorage as base64)
@@ -1142,13 +1125,6 @@ function buildDmdMap(wb) {
 // COLUMN RESOLUTION  (three-link chain: thg → DMD → template)
 // ============================================================
 
-// Strip trailing unit/spec suffix in parentheses for normalized matching.
-// "Pallet Weight (kg)" → "Pallet Weight", "Diameter (cm)" → "Diameter"
-// Exact match always takes priority; normalization is only a fallback.
-function normHeader(s) {
-  return String(s).trim().replace(/\s*\([^)]*\)\s*$/, "").trim();
-}
-
 // Build dispName-keyed lookups from the DMD for auto-matching.
 function buildDmdReverseMaps(dmd) {
   var dispToGroup = {}, dispToMandatory = {}, dispToThg = {};
@@ -1192,9 +1168,9 @@ function canonicalUom(raw) {
 }
 
 // Decide the fallback unit for one column, used for rows where the input supplies none.
-// Precedence is handled by the caller: a register ".UOM" column beats the header
+// Precedence is handled by the caller: a ".UOM" input column beats the header
 // parenthetical, which beats the DMD default.
-// `hasUomCol` suppresses the no-unit warning when the register carries the unit per row.
+// `hasUomCol` suppresses the no-unit warning when the input carries the unit per row.
 // Returns { unit, warning }.
 function resolveUomValue(srcHeader, dispName, uomInfo, hasUomCol) {
   var allowed = uomInfo.allowed || [], allowedCanon = {};
@@ -1238,7 +1214,7 @@ function resolveUomValue(srcHeader, dispName, uomInfo, hasUomCol) {
 // Render a value the way its DMD DATA TYPE says it should read: a decimal always shows a
 // decimal point ("300" -> "300.00"), an integer never does ("300.0" -> "300"). Cells are
 // written as inline strings, so this text is exactly what lands in the sheet.
-// Anything that is not a plain number is passed through untouched — the register still holds
+// Anything that is not a plain number is passed through untouched — an input can still hold
 // values like "0.95 kg", "19.5\"" and "N/A", and mangling those would lose data.
 // Decimal places come from each attribute's PRECISION (or MAXIMUM PRECISION) in the Thing or
 // taxonomy ATTRIBUTES sheet. Only an attribute that sets neither falls back to this default,
@@ -1269,7 +1245,7 @@ function cleanNumber(str) {
   return /^[+-]?\d+(\.\d+)?$/.test(s) ? s : null;
 }
 
-// Category-specific values the register carries for a SKU whose L4 does not bind that
+// Category-specific values the input carries for a SKU whose L4 does not bind that
 // attribute: column → { count, example }. Not written, because Syndigo has no slot for them.
 var CSA_SKIPPED = {};
 
@@ -1466,7 +1442,7 @@ function buildTaxonomyCsa(wb) {
   if (!wb.Sheets["ATTRIBUTES"] || !wb.Sheets["CATEGORY MODEL"]) return none;
 
   var attrs = buildDmdMap(wb);
-  // rsInternalTaxonomyModel… are Syndigo's own taxonomy bookkeeping, never register data.
+  // rsInternalTaxonomyModel… are Syndigo's own taxonomy bookkeeping, never input data.
   Object.keys(attrs.map).forEach(function(n) {
     if (!/^rsInternal/i.test(n)) return;
     ["map", "groupMap", "mandatoryMap", "uomMap", "typeMap", "precisionMap", "formatPrecisionMap", "multiMap"].forEach(function(k) {
@@ -1605,7 +1581,7 @@ function buildTaxonomyPathMap(wb) {
 // EXACT matching only. The normalized fallback that used to live here stripped the trailing
 // parenthetical, which let a stale template column capture an attribute that had since been
 // renamed ("Length" matching a leftover "Length (cm)" column), silently writing the data into
-// a header Syndigo does not recognise. The register now carries the DMD display names
+// a header Syndigo does not recognise. The VQS carries the model display names
 // directly, so a header either matches an attribute exactly or is reported as unmapped.
 // Returns { resolved, appended, matchedSrcs }.
 function autoMatchHeaders(inputHeaders, templateColMap, dmdReverse) {
@@ -1637,21 +1613,6 @@ function autoMatchHeaders(inputHeaders, templateColMap, dmdReverse) {
   });
 
   return { resolved: resolved, appended: appended, matchedSrcs: matchedSrcs };
-}
-
-function normalizeHeader(s) {
-  return s.toLowerCase().replace(/\s+/g, ' ').replace(/\s*\/\s*/g, '/').trim();
-}
-
-function resolveOne(thgKey, dmdMap, colMap) {
-  var dispName = dmdMap[thgKey];
-  if (!dispName) return undefined;
-  if (colMap[dispName] !== undefined) return colMap[dispName];
-  var norm = normalizeHeader(dispName);
-  for (var k in colMap) {
-    if (normalizeHeader(k) === norm) return colMap[k];
-  }
-  return undefined;
 }
 
 // auditInputHeaders: templateFile and inputFileName shown in warnings
@@ -1704,140 +1665,6 @@ function buildColMap(wb, sheetName) {
 }
 
 // ============================================================
-// REGISTER PARSER  (always reads from Issued sheet)
-// ============================================================
-
-function isRegister(wb) { return wb.SheetNames.indexOf("Issued") >= 0; }
-
-// Headers on row 1, data from row 2.
-function parseRegister(wb) {
-  var ws = wb.Sheets["Issued"];
-  if (!ws) throw new Error("No 'Issued' sheet found.");
-  // Read from A1 even if the sheet's declared range starts lower, so row 1 is always the header
-  var origRef = ws["!ref"];
-  if (origRef) ws["!ref"] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: XLSX.utils.decode_range(origRef).e });
-  var rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
-  ws["!ref"] = origRef;
-  var headers = (rows[0] || []).map(function(h) { return String(h).trim(); });
-  var sidIdx  = headers.indexOf("BBB SKU ID");
-  if (sidIdx < 0) throw new Error("'Issued' sheet has no 'BBB SKU ID' column in row 1 — the register's headers must start on row 1.");
-  var data = [];
-  for (var i = 1; i < rows.length; i++) {
-    var row = rows[i];
-    if (!row.some(function(c) { return c !== "" && c !== null && c !== undefined; })) continue;
-    if (sidIdx >= 0 && !row[sidIdx]) continue;
-    var obj = {};
-    headers.forEach(function(h, j) { if (h) obj[h] = (row[j] != null) ? row[j] : ""; });
-    data.push(obj);
-  }
-  data._headers = headers;
-  return data;
-}
-
-function groupRegisterRows(rows) {
-  var map = {}, order = [], allSkus = [];
-  for (var i = 0; i < rows.length; i++) {
-    var row = rows[i];
-    var pid = String(row["BBB Product ID"] || "").trim();
-    var sid = String(row["BBB SKU ID"]     || "").trim();
-    if (!pid || !sid) continue;
-    row._productId = pid;
-    row._skuId     = sid;
-    if (!map[pid]) {
-      var p = {}; for (var k in row) p[k] = row[k];
-      p._productId = pid;
-      map[pid] = p; order.push(pid);
-    }
-    allSkus.push(row);
-  }
-  return { products: order.map(function(id) { return map[id]; }), skus: allSkus };
-}
-
-// ============================================================
-// VENDOR QUOTE PARSER  (General / Kitchen & Dining formats)
-// ============================================================
-
-function detectQuoteSheet(wb) {
-  for (var i = 0; i < wb.SheetNames.length; i++) {
-    var n = wb.SheetNames[i];
-    if (/kitchen|dining/i.test(n)) return { name: n, format: "Kitchen & Dining" };
-  }
-  for (var i = 0; i < wb.SheetNames.length; i++) {
-    var n = wb.SheetNames[i];
-    if (/categor/i.test(n)) return { name: n, format: "General" };
-  }
-  for (var i = 0; i < wb.SheetNames.length; i++) {
-    var n = wb.SheetNames[i];
-    if (!/instruction|lookup|discount|how.?to|config|vendor.?log|_/i.test(n))
-      return { name: n, format: "General" };
-  }
-  return { name: wb.SheetNames[0], format: "General" };
-}
-
-// Product Names already used in Syndigo, from a product export's Entities sheet:
-// lower-cased name → Product IDs. The SKU-to-product graph errors when a name matches twice.
-function buildExportNames(wb) {
-  var rows = sheetRowsFromA1(wb, "Entities");
-  var hi = -1;
-  for (var r = 0; r < Math.min(6, rows.length); r++) {
-    var cand = (rows[r] || []).map(function(h) { return String(h).replace(/\/\/en-US$/, "").trim(); });
-    if (cand.indexOf("Type") >= 0 && cand.indexOf("Product Name") >= 0) { hi = r; break; }
-  }
-  if (hi < 0) throw new Error("no Type / Product Name header in the Entities sheet — is this a Syndigo product export?");
-  var h = rows[hi].map(function(x) { return String(x).replace(/\/\/en-US$/, "").trim(); });
-  var ti = h.indexOf("Type"), ni = h.indexOf("Product Name"), pi = h.indexOf("Product ID");
-  var names = {}, count = 0;
-  for (var i = hi + 1; i < rows.length; i++) {
-    var row = rows[i];
-    if (String(row[ti] || "").trim() !== "product") continue;
-    var name = String(row[ni] || "").trim().toLowerCase();
-    if (!name) continue;
-    (names[name] = names[name] || []).push(pi >= 0 ? String(row[pi] || "").trim() : "");
-    count++;
-  }
-  return { names: names, count: count };
-}
-
-function parseQuoteSheet(wb) {
-  var det = detectQuoteSheet(wb);
-  var ws  = wb.Sheets[det.name];
-  if (!ws) throw new Error("Sheet not found: " + det.name);
-  var raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
-  if (raw.length < 3) throw new Error("Sheet '" + det.name + "' has fewer than 3 rows.");
-  var headers = (raw[2] || []).map(function(h) { return String(h).trim(); });
-  if (headers.indexOf("Vendor SKU / Model #") < 0 && headers.indexOf("UPC Barcode (Unit)") < 0)
-    throw new Error("Sheet '" + det.name + "' missing expected headers in row 3 — not a Vendor Quote Sheet.");
-  var data = [], skuIdx = headers.indexOf("Vendor SKU / Model #");
-  for (var i = 3; i < raw.length; i++) {
-    var row = raw[i];
-    if (!row.some(function(c) { return c !== "" && c !== null && c !== undefined; })) continue;
-    if (skuIdx >= 0 && !row[skuIdx]) continue;
-    var obj = {};
-    headers.forEach(function(h, j) { if (h) obj[h] = (row[j] != null) ? row[j] : ""; });
-    data.push(obj);
-  }
-  data._headers = headers;
-  data._format  = det.format;
-  return data;
-}
-
-function groupSKUsIntoProducts(skus) {
-  var map = {}, order = [], warnings = [];
-  for (var i = 0; i < skus.length; i++) {
-    var sku  = skus[i];
-    var name = String(sku["Product Name"] || "").trim();
-    if (!name) { warnings.push("SKU \"" + (sku["Vendor SKU / Model #"] || "?") + "\" has no Product Name — skipped"); continue; }
-    if (!map[name]) {
-      var p = {}; for (var k in sku) p[k] = sku[k];
-      p._productId = ""; p._productName = name;
-      map[name] = p; order.push(name);
-    }
-    sku._productId = ""; sku._skuId = "";
-  }
-  return { products: order.map(function(n) { return map[n]; }), skus: skus, warnings: warnings };
-}
-
-// ============================================================
 // VQS PARSER  (universal vendor quote sheet generated from the models)
 // ============================================================
 // Columns are matched by their header name (row 4), never by position: the header moves with
@@ -1847,7 +1674,8 @@ function groupSKUsIntoProducts(skus) {
 // "Matrix" maps each L1|L2|L3|L4 choice to its taxonomy node. ID, Name, Product ID and SKU ID
 // are left blank for Syndigo to fill. Both files come from one pass, and a Syndigo graph links
 // each SKU to the product with its Product Name. From VQS v0.9 the rows of one product are the
-// rows with the same Product Name; an older VQS groups them by its Product Group # column.
+// rows with the same Product Name. An older VQS still has a Product Group # column: it is read
+// and ignored, so every VQS version groups the same way.
 
 var VQS_HEADER_ROW = 3;  // 0-based: headers on row 4
 var VQS_FIRST_ROW = 4;   // 0-based: data starts on row 5
@@ -1929,7 +1757,8 @@ function parseVqs(wb, dmdMap, model) {
   defs.forEach(function(d) { have[d.base] = true; });
   var structural = { _productgroup: "Product Group #", _l1: "L1 Category", _l2: "L2 Sub-Category",
                      _l3: "L3 Class", thgl4hierarchynode: "L4 Product Type" };
-  issues.byName = !have._productgroup;
+  issues.byName = true;                       // always group by Product Name
+  issues.hadGroupCol = !!have._productgroup;  // an old VQS: the column is ignored
   var missing = Object.keys(structural).filter(function(k) { return k !== "_productgroup" && !have[k]; });
   if (missing.length) throw new Error("the VQS tab has no " + missing.map(function(k) { return "“" + structural[k] + "”"; }).join(", ") +
     " column — its header may have been renamed or deleted");
@@ -1955,7 +1784,7 @@ function parseVqs(wb, dmdMap, model) {
       if (v == null) return;
       if (typeof v === "string") v = v.trim();
       if (v === "") return;
-      if (d.kind === "group") { rec._group = String(v); return; }
+      if (d.kind === "group") return;
       if (/^l[1-4]$/.test(d.kind)) { path[Number(d.kind[1]) - 1] = String(v); return; }
       if (d.dim) { (dims[d.dim] = dims[d.dim] || {})[d.key.split("|").pop()] = v; return; }
       var disp = dmdMap[d.base];
@@ -2007,12 +1836,10 @@ function parseVqs(wb, dmdMap, model) {
 // ROW BUILDERS  (return {colIndex: value})
 // ============================================================
 
-function buildProductRow(product, resolvedCols, prodIdCi, prodTypeCi, prodNameCi) {
+// ID, Name, Product ID and SKU ID stay blank: Syndigo fills them in.
+function buildProductRow(product, resolvedCols, prodTypeCi) {
   var cells = {};
-  if (prodTypeCi !== undefined)                       cells[prodTypeCi] = "product";
-  var prodName = product._productId;
-  if (prodNameCi !== undefined && prodName)           cells[prodNameCi] = String(prodName);
-  if (prodIdCi   !== undefined && product._productId) cells[prodIdCi]   = String(product._productId);
+  if (prodTypeCi !== undefined) cells[prodTypeCi] = "product";
   for (var i = 0; i < resolvedCols.length; i++) {
     var col = resolvedCols[i];
     var v   = product[col.src];
@@ -2027,13 +1854,9 @@ function buildProductRow(product, resolvedCols, prodIdCi, prodTypeCi, prodNameCi
   return cells;
 }
 
-function buildSKURow(sku, resolvedCols, skuIdCi, skuProdIdCi, skuTypeCi, skuNameCi) {
+function buildSKURow(sku, resolvedCols, skuTypeCi) {
   var cells = {};
-  if (skuTypeCi   !== undefined)                    cells[skuTypeCi]   = "sku";
-  var skuName = sku._productId;
-  if (skuNameCi   !== undefined && skuName)         cells[skuNameCi]   = String(skuName);
-  if (skuIdCi     !== undefined && sku._skuId)      cells[skuIdCi]     = String(sku._skuId);
-  if (skuProdIdCi !== undefined && sku._productId)  cells[skuProdIdCi] = String(sku._productId);
+  if (skuTypeCi !== undefined) cells[skuTypeCi] = "sku";
   for (var i = 0; i < resolvedCols.length; i++) {
     var col = resolvedCols[i];
     var v   = sku[col.src];
@@ -2043,7 +1866,7 @@ function buildSKURow(sku, resolvedCols, skuIdCi, skuProdIdCi, skuTypeCi, skuName
       if (col.csa && sku._csaAllowed && !sku._csaAllowed[col.csa]) {
         var sk = CSA_SKIPPED[col.dispName] = CSA_SKIPPED[col.dispName] || { count: 0, example: null };
         sk.count++;
-        if (!sk.example) sk.example = { sku: sku._skuId, l4: sku._l4TypeRaw || l4ValueOf(sku), value: v };
+        if (!sk.example) sk.example = { row: sku._row, l4: sku._l4TypeRaw || l4ValueOf(sku), value: v };
         continue;
       }
       cells[col.ci] = formatCellValue(v, col);
@@ -3341,18 +3164,7 @@ function showTemplateCached(key, label, statusId, dropId) {
       var taxResult = buildTaxonomyPathMap(wb);
       n = Object.keys(taxResult.pathMap).length;
       badge = n ? (n + " categories cached") : "loaded (no productTaxonomy categories)";
-    } else if (key === EXPORT_KEY) {
-      if (!wb.Sheets["Entities"]) throw new Error("missing Entities sheet — is this a Syndigo product export?");
-      n = buildExportNames(wb).count;
-      if (!n) throw new Error("No product names found in export");
-      badge = n + " product name(s) cached";
-    } else {
-      if (!wb.Sheets["Entities"]) throw new Error("no Entities sheet");
-      var map = buildColMap(wb, "Entities");
-      n = Object.keys(map).length;
-      if (!n) throw new Error("0 columns");
-      badge = n + " columns cached";
-    }
+    } else return false;
     document.getElementById(statusId).className = "file-status ok";
     document.getElementById(statusId).innerHTML =
       "<span>&#x2713; <strong>" + escHtml(label) + "</strong> — " + badge + "</span>" +
@@ -3395,13 +3207,6 @@ async function handleTemplateFile(file, key, label, statusId, dropId) {
       if (!Object.keys(dmdMap).length) throw new Error("No attributes found in ATTRIBUTES sheet.");
     } else if (key === TAX_KEY) {
       if (!wb.Sheets["CATEGORIES"]) throw new Error("No CATEGORIES sheet — is this the taxonomy model export?");
-    } else if (key === EXPORT_KEY) {
-      if (!wb.Sheets["Entities"]) throw new Error("No 'Entities' sheet — is this a Syndigo product export?");
-      if (!buildExportNames(wb).count) throw new Error("No product names found — check this is a Syndigo product export.");
-    } else {
-      if (!wb.Sheets["Entities"]) throw new Error("No 'Entities' sheet — is this a Syndigo import template?");
-      if (!Object.keys(buildColMap(wb, "Entities")).length)
-        throw new Error("Could not read column headers from Entities sheet row 2.");
     }
     if (!saveTemplateBuffer(key, buf)) throw new Error("Failed to cache file (localStorage may be full).");
     showTemplateCached(key, label, statusId, dropId);
@@ -3800,39 +3605,15 @@ async function handleInputFile(file) {
   try { inputWb = XLSX.read(inputBuf, { type: "array" }); }
   catch(e) { log("err", "Could not parse file: " + escHtml(e.message)); return; }
 
-  var products, allSkus, inputHeaders, registerFlow = false;
-  var vqsFlow = false, vqs = null;
-
-  if (isRegister(inputWb)) {
-    registerFlow = true;
-    log("info", "Format: <strong>Master SKU Register</strong> — reading Issued sheet");
-    var rows;
-    try { rows = parseRegister(inputWb); }
-    catch(e) { log("err", "Parse error: " + escHtml(e.message)); return; }
-    inputHeaders = rows._headers || [];
-    var g = groupRegisterRows(rows);
-    products = g.products; allSkus = g.skus;
-    log("ok", "Parsed <strong>" + allSkus.length + "</strong> SKUs across <strong>" + products.length + "</strong> products");
-  } else if (isVqs(inputWb)) {
-    // Read once the models are loaded: the VQS names attributes by key, not display name.
-    vqsFlow = true;
-    products = []; allSkus = []; inputHeaders = [];
-    var vqsStampCell = String((inputWb.Sheets["VQS"]["A1"] || {}).v || "");
-    log("info", "Format: <strong>Vendor quote sheet</strong> (" + escHtml(vqsStampCell.split("|").slice(1).join(" · ")) + ")");
-  } else {
-    log("info", "Format: <strong>Vendor Quote Sheet</strong>");
-    var skus;
-    try { skus = parseQuoteSheet(inputWb); }
-    catch(e) { log("err", "Parse error: " + escHtml(e.message)); return; }
-    inputHeaders = skus._headers || [];
-    log("info", "Sub-format: <strong>" + escHtml(skus._format || "General") + "</strong> — <strong>" + skus.length + "</strong> SKU rows");
-    if (!skus.length) { log("err", "No data rows found."); return; }
-    var g = groupSKUsIntoProducts(skus);
-    products = g.products; allSkus = g.skus;
-    (g.warnings || []).slice(0, 5).forEach(function(w) { log("warn", escHtml(w)); });
-    log("ok", "Grouped: <strong>" + products.length + "</strong> products, <strong>" + allSkus.length + "</strong> SKUs");
+  if (!isVqs(inputWb)) {
+    log("err", "This is not a VQS: cell A1 of a <strong>VQS</strong> sheet must start with VQS|. " +
+      "Vendor data must be on the standard VQS template; the Master SKU Register and the older Vendor Quote Sheet are no longer read.");
+    return;
   }
-  if (!vqsFlow && !products.length) { log("err", "No products found."); return; }
+  // Read once the models are loaded: the VQS names attributes by key, not display name.
+  var products = [], allSkus = [], inputHeaders = [];
+  var vqsStampCell = String((inputWb.Sheets["VQS"]["A1"] || {}).v || "");
+  log("info", "Format: <strong>Vendor quote sheet</strong> (" + escHtml(vqsStampCell.split("|").slice(1).join(" · ")) + ")");
 
   // Build DMD map
   var dmdWb, dmdMap, dmdGroupMap, dmdMandatoryMap, dmdUomMap, dmdTypeMap, dmdPrecisionMap, dmdFormatPrecisionMap, dmdMultiMap, earMap;
@@ -3905,103 +3686,115 @@ async function handleInputFile(file) {
 
   var dmdReverse = buildDmdReverseMaps({ map: dmdMap, groupMap: dmdGroupMap, mandatoryMap: dmdMandatoryMap });
 
-  if (vqsFlow) {
-    try { vqs = parseVqs(inputWb, dmdMap, { type: dmdTypeMap, multi: dmdMultiMap, dispToThg: dmdReverse.dispToThg }); }
-    catch(e) { log("err", "VQS error: " + escHtml(e.message)); return; }
-    var vi = vqs.issues;
-    if (!vqs.rows.length) { log("err", "The VQS has no filled-in rows."); return; }
-    var unm = Object.keys(vi.unmapped);
-    if (unm.length) log("warn", "<strong>" + unm.length + "</strong> VQS column(s) have no attribute in the loaded models and are skipped: " +
-      unm.map(function(k) { return "&ldquo;" + escHtml(k) + "&rdquo;"; }).join(", ") + ". Rebuild the VQS from the current models.");
-    var dup = Object.keys(vi.duplicate), unnamed = Object.keys(vi.unnamed);
-    if (dup.length) log("warn", "Column name(s) appear twice in the VQS, so only the first is used: " + dup.map(escHtml).join(", "));
-    if (unnamed.length) log("warn", "Column header(s) not recognised, so those columns are skipped: " + unnamed.map(escHtml).join(", ") +
-      ". A header must be the attribute's name from the models (or the VQS label); a column inserted by hand is ignored.");
-    if (vi.noGroup.length) log("err", "<strong>" + vi.noGroup.length + "</strong> row(s) have no " +
-      (vi.byName ? "Product Name" : "Product Group #") + " and are left out: row(s) " + vi.noGroup.slice(0, 15).join(", "));
-    if (vi.badL4.length) log("warn", "<strong>" + vi.badL4.length + "</strong> row(s) have an L1–L4 choice that is incomplete or not in the taxonomy: " +
-      vi.badL4.slice(0, 8).map(function(b) { return "row " + b.row + " (" + escHtml(b.path) + ")"; }).join(", "));
-    if (vi.badDim.length) log("warn", "<strong>" + vi.badDim.length + "</strong> dimension value(s) need L, W, H and a unit and were left out: " +
-      vi.badDim.slice(0, 8).map(function(b) { return "row " + b.row + " " + escHtml(b.field); }).join(", "));
-    if (vi.notOk.length) log("warn", "<strong>" + vi.notOk.length + "</strong> of " + vqs.rows.length + " row(s) don't show OK in the VQS Status column. " +
-      "They are converted anyway — check them before importing: " +
-      vi.notOk.slice(0, 10).map(function(n) { return "row " + n.row + " (" + escHtml(n.status) + ")"; }).join("; ") +
-      (vi.notOk.length > 10 ? "; and " + (vi.notOk.length - 10) + " more" : ""));
+  var vqs;
+  try { vqs = parseVqs(inputWb, dmdMap, { type: dmdTypeMap, multi: dmdMultiMap, dispToThg: dmdReverse.dispToThg }); }
+  catch(e) { log("err", "VQS error: " + escHtml(e.message)); return; }
+  var vi = vqs.issues;
+  if (!vqs.rows.length) { log("err", "The VQS has no filled-in rows."); return; }
+  var unm = Object.keys(vi.unmapped);
+  if (unm.length) log("warn", "<strong>" + unm.length + "</strong> VQS column(s) have no attribute in the loaded models and are skipped: " +
+    unm.map(function(k) { return "&ldquo;" + escHtml(k) + "&rdquo;"; }).join(", ") + ". Rebuild the VQS from the current models.");
+  var dup = Object.keys(vi.duplicate), unnamed = Object.keys(vi.unnamed);
+  if (dup.length) log("warn", "Column name(s) appear twice in the VQS, so only the first is used: " + dup.map(escHtml).join(", "));
+  if (unnamed.length) log("warn", "Column header(s) not recognised, so those columns are skipped: " + unnamed.map(escHtml).join(", ") +
+    ". A header must be the attribute's name from the models (or the VQS label); a column inserted by hand is ignored.");
+  if (vi.hadGroupCol) log("info", "This VQS has a Product Group # column. It is ignored: rows with the same Product Name form one product.");
+  if (vi.noGroup.length) log("err", "<strong>" + vi.noGroup.length + "</strong> row(s) have no Product Name and are left out: row(s) " +
+    vi.noGroup.slice(0, 15).join(", "));
+  if (vi.badL4.length) log("warn", "<strong>" + vi.badL4.length + "</strong> row(s) have an L1–L4 choice that is incomplete or not in the taxonomy: " +
+    vi.badL4.slice(0, 8).map(function(b) { return "row " + b.row + " (" + escHtml(b.path) + ")"; }).join(", "));
+  if (vi.badDim.length) log("warn", "<strong>" + vi.badDim.length + "</strong> dimension value(s) need L, W, H and a unit and were left out: " +
+    vi.badDim.slice(0, 8).map(function(b) { return "row " + b.row + " " + escHtml(b.field); }).join(", "));
+  if (vi.notOk.length) log("warn", "<strong>" + vi.notOk.length + "</strong> of " + vqs.rows.length + " row(s) don't show OK in the VQS Status column. " +
+    "They are converted anyway — check them before importing: " +
+    vi.notOk.slice(0, 10).map(function(n) { return "row " + n.row + " (" + escHtml(n.status) + ")"; }).join("; ") +
+    (vi.notOk.length > 10 ? "; and " + (vi.notOk.length - 10) + " more" : ""));
 
-    var vendorDisp = dmdMap["thgvendor"], nameDisp = dmdMap["thgproductname"];
-    var byGroup = {}, groupOrder = [];
-    vqs.rows.forEach(function(rec) {
-      if (!rec._group) return;
-      if (!byGroup[rec._group]) { byGroup[rec._group] = []; groupOrder.push(rec._group); }
-      byGroup[rec._group].push(rec);
-    });
-    var vendor = vendorDisp ? (vqs.rows[0][vendorDisp] || "") : "";
-    var stamp = vqsStamp(vendor, groupOrder.map(function(g) { return g + "=" + (byGroup[g][0][nameDisp] || ""); }));
-    vqs.stamp = stamp;
+  var vendorDisp = dmdMap["thgvendor"], nameDisp = dmdMap["thgproductname"];
+  var byGroup = {}, groupOrder = [];
+  vqs.rows.forEach(function(rec) {
+    if (!rec._group) return;
+    if (!byGroup[rec._group]) { byGroup[rec._group] = []; groupOrder.push(rec._group); }
+    byGroup[rec._group].push(rec);
+  });
+  var vendor = vendorDisp ? (vqs.rows[0][vendorDisp] || "") : "";
+  var stamp = vqsStamp(vendor, groupOrder.map(function(g) { return g + "=" + (byGroup[g][0][nameDisp] || ""); }));
+  vqs.stamp = stamp;
 
-    // SKUs link to their product through a Syndigo graph that matches Product Name, so every
-    // group needs a name of its own; a name used twice links nothing.
-    var nameOf = {}, groupsByName = {}, noName = [], dupName = [], renamed = 0;
-    groupOrder.forEach(function(g) {
-      var n = String(byGroup[g][0][nameDisp] || "").trim();
-      nameOf[g] = n;
-      if (!n) { noName.push(g); return; }
-      (groupsByName[n.toLowerCase()] = groupsByName[n.toLowerCase()] || []).push(g);
-    });
-    Object.keys(groupsByName).forEach(function(k) {
-      if (groupsByName[k].length > 1) dupName.push(groupsByName[k]);
-    });
-    var leftOut = {};
-    noName.forEach(function(g) { leftOut[g] = true; });
-    dupName.forEach(function(gs) { gs.forEach(function(g) { leftOut[g] = true; }); });
+  // SKUs link to their product through a Syndigo graph that matches Product Name, so every
+  // group needs a name of its own; a name used twice links nothing.
+  var nameOf = {}, groupsByName = {}, noName = [], dupName = [], renamed = 0;
+  groupOrder.forEach(function(g) {
+    var n = String(byGroup[g][0][nameDisp] || "").trim();
+    nameOf[g] = n;
+    if (!n) { noName.push(g); return; }
+    (groupsByName[n.toLowerCase()] = groupsByName[n.toLowerCase()] || []).push(g);
+  });
+  Object.keys(groupsByName).forEach(function(k) {
+    if (groupsByName[k].length > 1) dupName.push(groupsByName[k]);
+  });
+  var leftOut = {};
+  noName.forEach(function(g) { leftOut[g] = true; });
+  dupName.forEach(function(gs) { gs.forEach(function(g) { leftOut[g] = true; }); });
 
-    groupOrder.forEach(function(g) {
-      if (leftOut[g]) return;
-      var first = byGroup[g][0], p = {};
-      for (var k in first) p[k] = first[k];
-      p._productId = "";
-      products.push(p);
-      byGroup[g].forEach(function(rec) {
-        if (rec[nameDisp] !== first[nameDisp]) renamed++;
-        rec[nameDisp] = first[nameDisp];
-        rec._skuId = "";
-        rec._productId = "";
-        allSkus.push(rec);
-      });
+  groupOrder.forEach(function(g) {
+    if (leftOut[g]) return;
+    var first = byGroup[g][0], p = {};
+    for (var k in first) p[k] = first[k];
+    products.push(p);
+    byGroup[g].forEach(function(rec) {
+      if (rec[nameDisp] !== first[nameDisp]) renamed++;
+      rec[nameDisp] = first[nameDisp];
+      allSkus.push(rec);
     });
-    inputHeaders = vqs.headers;
-    log("ok", "VQS: <strong>" + vqs.rows.length + "</strong> SKU row(s) in <strong>" + groupOrder.length +
-      "</strong> product group(s) — file stamp <strong>" + stamp + "</strong>; ID, Name, Product ID and SKU ID are left blank for Syndigo");
-    if (noName.length) log("err", "<strong>" + noName.length + "</strong> product group(s) have no Product Name, so their SKUs " +
-      "could not link and the group is left out: " + noName.slice(0, 15).map(escHtml).join(", "));
-    if (dupName.length) log("err", "<strong>" + dupName.length + "</strong> Product Name(s) are used by more than one product group, " +
-      "so Syndigo could not tell which product their SKUs belong to; those groups are left out: " +
-      dupName.slice(0, 10).map(function(gs) {
-        return "&ldquo;" + escHtml(nameOf[gs[0]]) + "&rdquo; (" + gs.map(escHtml).join(", ") + ")";
-      }).join("; ") + ". Give each product its own name.");
-    if (renamed) log("warn", "<strong>" + renamed + "</strong> SKU row(s) had a Product Name different from the first row of their group; " +
-      "they take the group's name so they link to that product.");
+  });
+  inputHeaders = vqs.headers;
+  log("ok", "VQS: <strong>" + vqs.rows.length + "</strong> SKU row(s) in <strong>" + groupOrder.length +
+    "</strong> product group(s) — file stamp <strong>" + stamp + "</strong>; ID, Name, Product ID and SKU ID are left blank for Syndigo");
+  if (noName.length) log("err", "<strong>" + noName.length + "</strong> product group(s) have no Product Name, so their SKUs " +
+    "could not link and the group is left out: " + noName.slice(0, 15).map(escHtml).join(", "));
+  if (dupName.length) log("err", "<strong>" + dupName.length + "</strong> Product Name(s) are used by more than one product group, " +
+    "so Syndigo could not tell which product their SKUs belong to; those groups are left out: " +
+    dupName.slice(0, 10).map(function(gs) {
+      return "&ldquo;" + escHtml(nameOf[gs[0]]) + "&rdquo; (" + gs.map(escHtml).join(", ") + ")";
+    }).join("; ") + ". Give each product its own name.");
+  if (renamed) log("warn", "<strong>" + renamed + "</strong> SKU row(s) had a Product Name different from the first row of their group; " +
+    "they take the group's name so they link to that product.");
 
-    var existing = null;
-    try { existing = await source.productNames(); }
-    catch(e) { log("warn", "Existing Product Names could not be loaded for the name check: " + escHtml(e.message)); }
-    if (existing) {
-      try {
-        var taken = products.filter(function(p) { return existing.names[String(p[nameDisp]).trim().toLowerCase()]; });
-        log(taken.length ? "err" : "ok", taken.length
-          ? "<strong>" + taken.length + "</strong> Product Name(s) already exist in Syndigo (" + escHtml(source.namesFrom) + "), so their SKUs would match " +
-            "two products and link to neither: " + taken.slice(0, 10).map(function(p) {
-              var ids = existing.names[String(p[nameDisp]).trim().toLowerCase()].filter(Boolean);
-              return "&ldquo;" + escHtml(p[nameDisp]) + "&rdquo;" + (ids.length ? " (Product ID " + ids.map(escHtml).join(", ") + ")" : "");
-            }).join(", ") + (taken.length > 10 ? ", and " + (taken.length - 10) + " more" : "") +
-            ". Rename them before importing, unless those are this VQS's own products, already imported."
-          : "Product Names: none of the " + products.length + " are used by the " + existing.count + " products in Syndigo (" + escHtml(source.namesFrom) + ").");
-      } catch(e) { log("warn", "The Product Name check failed: " + escHtml(e.message)); }
-    }
-    if (!products.length) { log("err", "No products to write."); return; }
-    log("info", "Import the product file first. Once Syndigo has created the products, import the SKU file: " +
-      "each SKU links to the product with the same Product Name, and Syndigo fills in the IDs.");
+  var existing = null;
+  try { existing = await source.productNames(); }
+  catch(e) { log("warn", "Existing Product Names could not be loaded for the name check: " + escHtml(e.message)); }
+  if (existing) {
+    try {
+      var nameKey = function(p) { return String(p[nameDisp]).trim().toLowerCase(); };
+      var taken = products.filter(function(p) { return existing.names[nameKey(p)]; });
+      var idsOf = function(p) { return existing.names[nameKey(p)].filter(Boolean); };
+      var list = function(ps) {
+        return ps.slice(0, 10).map(function(p) {
+          var ids = idsOf(p);
+          return "&ldquo;" + escHtml(p[nameDisp]) + "&rdquo;" + (ids.length ? " (Product ID " + ids.map(escHtml).join(", ") + ")" : "");
+        }).join(", ") + (ps.length > 10 ? ", and " + (ps.length - 10) + " more" : "");
+      };
+      if (taken.length) {
+        products = products.filter(function(p) { return !existing.names[nameKey(p)]; });
+        log("err", "<strong>" + taken.length + "</strong> Product Name(s) already exist in Syndigo (" + escHtml(source.namesFrom) + "), so " +
+          (products.length ? "they are left out of the product file" : "there is no product file") +
+          ": importing them again would create duplicate products. Their SKUs are still in the SKU file and link to the existing product: " +
+          list(taken) + ".");
+        var several = taken.filter(function(p) { return idsOf(p).length > 1; });
+        if (several.length) log("err", "<strong>" + several.length + "</strong> of those names belong to more than one product in Syndigo, " +
+          "so their SKUs will not link to either: " + list(several) + ". Merge or rename the duplicates in Syndigo first.");
+      } else {
+        log("ok", "Product Names: none of the " + products.length + " are used by the " + existing.count + " products in Syndigo (" + escHtml(source.namesFrom) + ").");
+      }
+    } catch(e) { log("warn", "The Product Name check failed: " + escHtml(e.message)); }
   }
+  if (!products.length && !allSkus.length) { log("err", "No products to write."); return; }
+  log("info", products.length
+    ? "Import the product file first. Once Syndigo has created the products, import the SKU file: " +
+      "each SKU links to the product with the same Product Name, and Syndigo fills in the IDs."
+    : "There is no product file: every product already exists. Import the SKU file; each SKU links to the existing " +
+      "product with the same Product Name, and Syndigo fills in the IDs.");
 
   // Taxonomy paths — L4 names become full paths, and each SKU learns which category-specific
   // attributes its L4 binds.
@@ -4094,7 +3887,7 @@ async function handleInputFile(file) {
     var prodWb  = XLSX.read(prodBuf, { type: "array" });
     var prodMap = buildColMap(prodWb, "Entities");
 
-    // Register headers map to attributes by exact DMD display name.
+    // VQS headers map to attributes by exact DMD display name.
     var autoProd         = autoMatchHeaders(inputHeaders, prodMap, dmdReverse);
     var excludedAtProduct = [], csaAtProduct = [];
     var resolvedProdCols = autoProd.resolved.filter(function(c) {
@@ -4114,7 +3907,7 @@ async function handleInputFile(file) {
         "these are SKU attributes");
     }
 
-    // Append columns valid in DMD + register but absent from product.xlsm
+    // Append columns valid in DMD + input but absent from product.xlsm
     var appendedProdCols = [];
     var maxProdCi = Object.values(prodMap).reduce(function(a, b) { return Math.max(a, b); }, 0);
     var nextProdCi = maxProdCi + 1;
@@ -4156,33 +3949,31 @@ async function handleInputFile(file) {
     warnMissingGroups(appendedProdCols, prodWb, "Product");
     state.appendedProdCols = appendedProdCols;
 
-    var prodIdCi       = resolveOne(THG_PRODUCT_ID, dmdMap, prodMap);
     var prodTypeCi     = prodMap["Type"];
-    var prodNameCi     = prodMap["Name"];
     auditInputHeaders(inputHeaders, resolvedProdCols, "Product", "product.xlsm", file.name).forEach(function(w) { log("warn", w); });
 
     log("ok", "Product columns resolved: <strong>" + resolvedProdCols.length + "</strong> mapped" +
       (appendedProdCols.length ? " (<strong>" + appendedProdCols.length + "</strong> appended)" : ""));
 
-    state.productRows     = products.map(function(p) { return buildProductRow(p, resolvedProdCols, prodIdCi, prodTypeCi, prodNameCi); });
+    state.productRows     = products.map(function(p) { return buildProductRow(p, resolvedProdCols, prodTypeCi); });
     logDecimalRounding("Product");
     state.prodTemplateBuf = prodBuf;
 
-    log("ok", "Products: <strong>" + products.length + "</strong> rows ready");
+    log(products.length ? "ok" : "info", products.length ? "Products: <strong>" + products.length + "</strong> rows ready" : "Products: none to write");
   } catch(e) { log("err", "Product build failed: " + escHtml(e.message)); console.error(e); return; }
 
-  state.fileTag = (source.env === "nonprod" ? "DEV_" : "") + (vqsFlow ? "VQS-" + vqs.stamp + "_" : "");
+  state.fileTag = (source.env === "nonprod" ? "DEV_" : "") + "VQS-" + vqs.stamp + "_";
 
   // ── SKU ──────────────────────────────────────────────────────
   try {
     var skuWb  = XLSX.read(skuBuf,  { type: "array" });
     var skuMap = buildColMap(skuWb,  "Entities");
 
-    // Register headers map to attributes by exact DMD display name.
+    // VQS headers map to attributes by exact DMD display name.
     var autoSku         = autoMatchHeaders(inputHeaders, skuMap, dmdReverse);
     var resolvedSkuCols = autoSku.resolved.slice();
 
-    // Append columns valid in DMD + register but absent from SKU.xlsm
+    // Append columns valid in DMD + input but absent from SKU.xlsm
     var appendedSkuCols = [];
     var maxSkuCi = Object.values(skuMap).reduce(function(a, b) { return Math.max(a, b); }, 0);
     var nextSkuCi = maxSkuCi + 1;
@@ -4227,18 +4018,14 @@ async function handleInputFile(file) {
     warnMissingGroups(appendedSkuCols, skuWb, "SKU");
     state.appendedSkuCols = appendedSkuCols;
 
-    var skuIdCi     = resolveOne(THG_SKU_ID,     dmdMap, skuMap);
-    var skuProdIdCi = resolveOne(THG_PRODUCT_ID, dmdMap, skuMap);
     var skuTypeCi   = skuMap["Type"];
-    var skuNameCi   = skuMap["Name"];
     auditInputHeaders(inputHeaders, resolvedSkuCols, "SKU", "SKU.xlsm", file.name).forEach(function(w) { log("warn", w); });
 
     log("ok", "SKU columns resolved: <strong>" + resolvedSkuCols.length + "</strong> mapped" +
-      (appendedSkuCols.length ? " (<strong>" + appendedSkuCols.length + "</strong> appended)" : "") +
-      " — SKU ID ci=" + skuIdCi + ", Product ID ci=" + skuProdIdCi);
+      (appendedSkuCols.length ? " (<strong>" + appendedSkuCols.length + "</strong> appended)" : ""));
 
     CSA_SKIPPED = {};
-    state.skuRows = allSkus.map(function(s) { return buildSKURow(s, resolvedSkuCols, skuIdCi, skuProdIdCi, skuTypeCi, skuNameCi); });
+    state.skuRows = allSkus.map(function(s) { return buildSKURow(s, resolvedSkuCols, skuTypeCi); });
     var skippedCols = Object.keys(CSA_SKIPPED);
     if (skippedCols.length) {
       var skippedTotal = skippedCols.reduce(function(a, k) { return a + CSA_SKIPPED[k].count; }, 0);
@@ -4247,12 +4034,12 @@ async function handleInputFile(file) {
         "from the DD's CSA tab: " +
         skippedCols.map(function(k) {
           var e = CSA_SKIPPED[k];
-          return "<strong>" + escHtml(k) + "</strong> (" + e.count + ", e.g. SKU " + escHtml(e.example.sku) +
+          return "<strong>" + escHtml(k) + "</strong> (" + e.count + ", e.g. VQS row " + escHtml(e.example.row) +
                  " in &ldquo;" + escHtml(e.example.l4) + "&rdquo; = &ldquo;" + escHtml(e.example.value) + "&rdquo;)";
         }).join("; "));
     }
     logDecimalRounding("SKU");
-    // Every input column should land somewhere. Anything left over is either a new register
+    // Every input column should land somewhere. Anything left over is either a new
     // column nobody has mapped yet or a header that has been renamed out from under the tool
     // — both silently dropped data before this warning existed.
     var mappedSrcs = {};
@@ -4260,7 +4047,7 @@ async function handleInputFile(file) {
       if (a) Object.keys(a.matchedSrcs).forEach(function(src) { mappedSrcs[src] = true; });
     });
     var unmappedSrcs = inputHeaders.filter(function(h) {
-      return h && !mappedSrcs[h] && REGISTER_IGNORE.indexOf(h) < 0 && !/\.UOM$/i.test(h);
+      return h && !mappedSrcs[h] && !/\.UOM$/i.test(h);
     });
     if (unmappedSrcs.length) {
       log("warn", "<strong>" + unmappedSrcs.length + "</strong> input column(s) map to nothing in the " +
@@ -4284,10 +4071,11 @@ async function handleInputFile(file) {
     log("ok", "SKUs: <strong>" + allSkus.length + "</strong> rows ready");
   } catch(e) { log("err", "SKU build failed: " + escHtml(e.message)); console.error(e); return; }
 
-  document.getElementById("btn-dl-products").disabled = false;
+  document.getElementById("btn-dl-products").disabled = !products.length;
   document.getElementById("btn-dl-skus").disabled     = false;
   setStatus("input-status", "ok", "&#x2713; " + escHtml(file.name) + " — " +
-    products.length + " products, " + allSkus.length + " SKUs ready" + (vqsFlow ? " (import products first)" : ""));
+    (products.length ? products.length + " products, " + allSkus.length + " SKUs ready (import products first)"
+                     : "no new products, " + allSkus.length + " SKUs ready"));
 }
 
 // ============================================================
@@ -4295,7 +4083,7 @@ async function handleInputFile(file) {
 // ============================================================
 
 document.getElementById("btn-dl-products").addEventListener("click", async function() {
-  if (!state.productRows || !state.prodTemplateBuf) return;
+  if (!state.productRows || !state.productRows.length || !state.prodTemplateBuf) return;
   this.disabled = true;
   this.textContent = "Building…";
   try {
