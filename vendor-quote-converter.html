@@ -509,7 +509,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
         name: n, domain: m.domain === "taxonomyModel" ? "tax" : "thing", disp: p.externalName || n, group: p.groupName || "",
         dtype: normType(p.dataType), dispType: p.displayType || "", multi: !!p.isCollection, loc: !!p.isLocalizable,
         req: !!p.required, sortSeq: num(p.sortSequence), dispSeq: num(p.displaySequence), help: txt(p.description),
-        ref: ref ? ref.refEntityType : "", uomType: uom ? uom.uomEntityType : "", uomAllowed: p.uomAllowedUnitSymbols || [],
+        ref: ref ? ref.refEntityType : "", uomType: uom ? uom.uomEntityType : "", uomAllowed: [].concat(p.uomAllowedUnitSymbols || []),  // a single allowed unit arrives as a plain string
         uomDefault: p.defaultUom || "", precision: num(p.precision), maxPrecision: num(p.maxPrecision), parent: p.parentAttributeName || ""
       };
     });
@@ -956,8 +956,8 @@ var SKELETON_B64 = "UEsDBBQAAAAIAAAAAADScKD32wEAAJ8LAAATAAAAW0NvbnRlbnRfVHlwZXNd
 
 // Bump on every change that gets pushed. Shown next to the page title so you can confirm
 // at a glance which build the browser is actually running.
-const APP_VERSION = "2.9.0";
-const APP_BUILT   = "2026-11-12";
+const APP_VERSION = "2.9.2";
+const APP_BUILT   = "2026-11-17";
 
 const PROD_TMPL_KEY = "syndigo_prod_tmpl_v2";
 const SKU_TMPL_KEY  = "syndigo_sku_tmpl_v2";
@@ -1846,7 +1846,8 @@ function groupSKUsIntoProducts(skus) {
 // How each attribute is treated comes from those suffixes and the loaded models.
 // "Matrix" maps each L1|L2|L3|L4 choice to its taxonomy node. ID, Name, Product ID and SKU ID
 // are left blank for Syndigo to fill. Both files come from one pass, and a Syndigo graph links
-// each SKU to the product with its Product Name.
+// each SKU to the product with its Product Name. From VQS v0.9 the rows of one product are the
+// rows with the same Product Name; an older VQS groups them by its Product Group # column.
 
 var VQS_HEADER_ROW = 3;  // 0-based: headers on row 4
 var VQS_FIRST_ROW = 4;   // 0-based: data starts on row 5
@@ -1857,7 +1858,9 @@ var VQS_LABELS = {
   "L4 Product Type": "thgl4hierarchynode", "Item / Model #": "thgitemmodel",
   "Product Dimensions": "thgproductdimensionslwh", "Packaged Unit Dimensions": "thgunitdimensionslwh",
   "Inner Dimensions": "thginnerdimensionslwh", "Case Dimensions": "thgcasedimensionslwh",
-  "Retail Price": "thgsellingprice"
+  "Retail Price": "thgsellingprice",
+  // Names an older VQS still carries after the model renamed the attribute.
+  "MAP (Y or N)": "thgmap"
 };
 var CM_PER_UNIT = { mm: 0.1, cm: 1, m: 100, "in": 2.54, ft: 30.48, yd: 91.44 };
 
@@ -1926,7 +1929,8 @@ function parseVqs(wb, dmdMap, model) {
   defs.forEach(function(d) { have[d.base] = true; });
   var structural = { _productgroup: "Product Group #", _l1: "L1 Category", _l2: "L2 Sub-Category",
                      _l3: "L3 Class", thgl4hierarchynode: "L4 Product Type" };
-  var missing = Object.keys(structural).filter(function(k) { return !have[k]; });
+  issues.byName = !have._productgroup;
+  var missing = Object.keys(structural).filter(function(k) { return k !== "_productgroup" && !have[k]; });
   if (missing.length) throw new Error("the VQS tab has no " + missing.map(function(k) { return "“" + structural[k] + "”"; }).join(", ") +
     " column — its header may have been renamed or deleted");
 
@@ -1986,6 +1990,10 @@ function parseVqs(wb, dmdMap, model) {
       if (!rec._l4Node) issues.badL4.push({ row: r + 1, path: path.join(" > ") });
     } else {
       issues.badL4.push({ row: r + 1, path: path.join(" > ") || "(none)" });
+    }
+    if (issues.byName) {
+      var nm = String(rec[dmdMap["thgproductname"]] || "").trim();
+      if (nm) rec._group = nm.toLowerCase().replace(/\s+/g, " ");
     }
     if (!rec._group) issues.noGroup.push(r + 1);
     if (rec._status.indexOf("OK") !== 0) issues.notOk.push({ row: r + 1, status: rec._status });
@@ -3909,7 +3917,8 @@ async function handleInputFile(file) {
     if (dup.length) log("warn", "Column name(s) appear twice in the VQS, so only the first is used: " + dup.map(escHtml).join(", "));
     if (unnamed.length) log("warn", "Column header(s) not recognised, so those columns are skipped: " + unnamed.map(escHtml).join(", ") +
       ". A header must be the attribute's name from the models (or the VQS label); a column inserted by hand is ignored.");
-    if (vi.noGroup.length) log("err", "<strong>" + vi.noGroup.length + "</strong> row(s) have no Product Group # and are left out: row(s) " + vi.noGroup.slice(0, 15).join(", "));
+    if (vi.noGroup.length) log("err", "<strong>" + vi.noGroup.length + "</strong> row(s) have no " +
+      (vi.byName ? "Product Name" : "Product Group #") + " and are left out: row(s) " + vi.noGroup.slice(0, 15).join(", "));
     if (vi.badL4.length) log("warn", "<strong>" + vi.badL4.length + "</strong> row(s) have an L1–L4 choice that is incomplete or not in the taxonomy: " +
       vi.badL4.slice(0, 8).map(function(b) { return "row " + b.row + " (" + escHtml(b.path) + ")"; }).join(", "));
     if (vi.badDim.length) log("warn", "<strong>" + vi.badDim.length + "</strong> dimension value(s) need L, W, H and a unit and were left out: " +
